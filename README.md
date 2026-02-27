@@ -10,8 +10,15 @@ A CLI tool designed to simply _recommend_ (conservative), and/or _profile_ (to m
 ## Quick Start
 
 ```bash
-pip install vllm
-pip install vllm-fit
+# Create and activate uv environment
+uv venv --seed --python 3.10
+source .venv/bin/activate
+
+# Install vLLM
+uv pip install vllm --torch-backend=auto
+
+# Install dependencies
+uv pip install vllm-fit
 ```
 
 Get instant parameter recommendations:
