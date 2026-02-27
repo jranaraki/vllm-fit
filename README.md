@@ -1,4 +1,4 @@
-# vllm-fit
+# vLLM-Fit
 
 <p align="center">
     <img src="logo.png" alt="vllm-tuner" style="width:30%; height:auto;">
