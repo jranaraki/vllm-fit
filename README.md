@@ -128,3 +128,7 @@ Try:
 3. **Profiles** by testing actual vLLM engine with different settings
 4. **Iteratively adjusts** memory, sequence length, and batch size until successful
 5. **Returns exact command** to run with optimal parameters
+
+## Acknowledgments
+
+- [llmfit](https://github.com/AlexsJones/llmfit) for the inspiration 
