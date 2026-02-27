@@ -1,6 +1,11 @@
 # vllm-fit
 
-Find optimal vLLM parameters for any Hugging Face model on your hardware automatically.
+<p align="center">
+    <img src="logo.png" alt="vllm-tuner" style="width:30%; height:auto;">
+</p>
+
+vllm-fit is a CLI tool designed to simply _recommend_ (conservative), and/or _profile_ (to maximize resource utilization) vLLM engine arguments for any Hugging Face model on the user's current hardware.
+
 
 ## Quick Start
 
