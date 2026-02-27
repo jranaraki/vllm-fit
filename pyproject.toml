@@ -1,0 +1,21 @@
+[project]
+name = "vllm-fit"
+version = "0.1.0"
+description = "CLI tool to discover optimal vLLM engine arguments for any HuggingFace model"
+requires-python = ">=3.9"
+dependencies = [
+    "huggingface-hub>=0.20.0",
+    "pynvml>=11.5.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+vllm-fit = "vllm_fit.cli:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
