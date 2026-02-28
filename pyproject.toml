@@ -1,8 +1,13 @@
 [project]
 name = "vllm-fit"
 version = "0.1.0"
-description = "CLI tool to discover optimal vLLM engine arguments for any HuggingFace model"
+description = "CLI tool to discover optimal vLLM engine arguments for any HuggingFace model on current user's hardware"
+readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Javad Anaraki"}
+]
 dependencies = [
     "huggingface-hub>=0.20.0",
     "pynvml>=11.5.0",
