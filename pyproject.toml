@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "CLI tool to discover optimal vLLM engine arguments for any HuggingFace model on current user's hardware"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = " MIT license"}
+license = {text = "MIT license"}
 authors = [
     {name = "Javad Anaraki"}
 ]
