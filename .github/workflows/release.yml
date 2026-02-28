@@ -35,7 +35,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Clean previous builds
-        run: rm -rf dist/
+        run: |
+          if [ -d "dist" ]; then
+            rm -rf dist
+          fi
+        shell: bash
 
       - name: Install build dependencies
         run: |
