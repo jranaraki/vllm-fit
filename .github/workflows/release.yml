@@ -34,6 +34,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Clean previous builds
+        run: rm -rf dist/
+
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
@@ -45,7 +48,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          # Using a simpler name pattern for easier downloading
           name: vllmfit-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/
 
@@ -58,12 +60,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ensure tag exists
+        run: |
+          git fetch --tags
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          git tag -l | grep -q "$TAG_NAME" || git tag "$TAG_NAME"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist/
-          pattern: dist-*
-          merge-multiple: true # This flattens all uploaded files into one folder
+          pattern: 'vllmfit-*'
+          merge-multiple: true
 
       - name: Generate Release Notes
         run: |
