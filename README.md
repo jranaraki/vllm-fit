@@ -94,9 +94,9 @@ Summary:
   • Strategy: Used --enforce-eager mode for memory efficiency
   • Time elapsed: 45s
 
-╭──────────────────────────────────── Dynamic Profiling ───────────────────────────────────────╮
-│ Optimized Parameters                                                                         │
-╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─────────────────────────────── Dynamic Profiling ───────────────────────────────╮
+│ Optimized Parameters                                                            │
+╰─────────────────────────────────────────────────────────────────────────────────╯
 model_id: Qwen/Qwen2.5-7B-Instruct
 gpu_memory_utilization: 0.80
 max_model_len: 4096
