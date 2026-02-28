@@ -38,24 +38,25 @@ jobs:
           pip install build tomlkit
 
       - name: Set package version from Git tag
-        shell: python
-        env:
-          # Pass the tag safely as an environment variable
-          RAW_TAG: ${{ github.ref_name }}
+        shell: bash
         run: |
-          import os
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "Setting package version to $TAG"
+
+          # Make sure tomlkit is installed in this Python environment
+          python -m pip install --upgrade pip
+          python -m pip install tomlkit
+
+          # Inline Python to update version
+          python - <<EOF
           import tomlkit
-          
-          tag = os.environ['RAW_TAG'].lstrip('v')
           pyproject_file = "pyproject.toml"
-          
           with open(pyproject_file, "r") as f:
               doc = tomlkit.parse(f.read())
-          
-          doc["project"]["version"] = tag
-          
+          doc["project"]["version"] = "${TAG#v}"  # remove leading 'v'
           with open(pyproject_file, "w") as f:
               f.write(tomlkit.dumps(doc))
+          EOF
 
       - name: Build package
         run: python -m build
