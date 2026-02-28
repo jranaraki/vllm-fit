@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # Using a simpler name pattern for easier downloading
-          name: vllm-fit-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.python-version }}
+          name: vllmfit-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/
 
   release:
