@@ -20,9 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract tag version
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -39,7 +36,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vllm-fit-${{ env.TAG }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: vllm-fit-${{ github.ref_name }}-${{ matrix.os }}-py${{ matrix.python-version }}
           path: dist/
 
   release:
