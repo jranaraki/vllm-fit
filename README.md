@@ -18,7 +18,7 @@ source .venv/bin/activate
 uv pip install vllm --torch-backend=auto
 
 # Install dependencies
-uv pip install vllm-fit
+uv pip install -e .
 ```
 
 Get instant parameter recommendations:
