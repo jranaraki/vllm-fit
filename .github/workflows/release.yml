@@ -39,21 +39,25 @@ jobs:
 
       - name: Set package version from Git tag
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          echo "Setting package version to $TAG"
-
-          # Make sure tomlkit is installed in this Python environment
-          python -m pip install --upgrade pip
+          # 1. Use 'python -m pip' to ensure it installs to the ACTIVE python environment
           python -m pip install tomlkit
-
-          # Inline Python to update version
+          
+          # 2. Run the script
           python - <<EOF
           import tomlkit
+          import os
+          
+          tag = os.environ['TAG'].lstrip('v')
           pyproject_file = "pyproject.toml"
+          
           with open(pyproject_file, "r") as f:
               doc = tomlkit.parse(f.read())
-          doc["project"]["version"] = "${TAG#v}"  # remove leading 'v'
+          
+          doc["project"]["version"] = tag
+          
           with open(pyproject_file, "w") as f:
               f.write(tomlkit.dumps(doc))
           EOF
