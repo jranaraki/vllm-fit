@@ -6,6 +6,11 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Prevents multiple release runs from clashing
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -19,6 +24,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Important for VCS-based versioning
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -28,27 +35,27 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build hatchling hatch-vcs
+          pip install build tomlkit
 
       - name: Set package version from Git tag
+        shell: python
+        env:
+          # Pass the tag safely as an environment variable
+          RAW_TAG: ${{ github.ref_name }}
         run: |
-          TAG=${GITHUB_REF#refs/tags/}   # strip 'refs/tags/' from ref
-          echo "Setting package version to $TAG"
-      
-          # Make sure tomlkit is installed in this Python environment
-          python -m pip install --upgrade pip
-          python -m pip install tomlkit
-      
-          # Inline Python to update version
-          python - <<EOF
+          import os
           import tomlkit
+          
+          tag = os.environ['RAW_TAG'].lstrip('v')
           pyproject_file = "pyproject.toml"
+          
           with open(pyproject_file, "r") as f:
               doc = tomlkit.parse(f.read())
-          doc["project"]["version"] = "${TAG#v}"  # remove leading 'v'
+          
+          doc["project"]["version"] = tag
+          
           with open(pyproject_file, "w") as f:
               f.write(tomlkit.dumps(doc))
-          EOF
 
       - name: Build package
         run: python -m build
@@ -56,14 +63,15 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vllm-fit-${{ github.ref_name }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          # Using a simpler name pattern for easier downloading
+          name: vllm-fit-${{ RAW_TAG }}${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/
 
   release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # Needed to create the release and upload assets
 
     steps:
       - uses: actions/checkout@v4
@@ -71,19 +79,13 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts/
-
-      - name: Merge artifacts
-        run: |
-          mkdir -p dist/
-          find artifacts/ -name "*.whl" -exec cp {} dist/ \;
-          find artifacts/ -name "*.tar.gz" -exec cp {} dist/ \;
+          path: dist/
+          pattern: dist-*
+          merge-multiple: true # This flattens all uploaded files into one folder
 
       - name: Generate Release Notes
-        id: release_notes
         run: |
-          echo "## Changes in this release" > release_notes.md
-          echo "" >> release_notes.md
+          echo "## Changes in ${{ github.ref_name }}" > release_notes.md
           if [ -f CHANGELOG.md ]; then
             head -n 20 CHANGELOG.md >> release_notes.md
           else
@@ -98,5 +100,3 @@ jobs:
           body_path: release_notes.md
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
