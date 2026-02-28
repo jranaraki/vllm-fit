@@ -15,8 +15,8 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11"]
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        python-version: [ "3.9", "3.10", "3.11" ]
         exclude:
           - os: macos-latest
             python-version: "3.9"
@@ -37,31 +37,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install build tomlkit
 
-      - name: Set package version from Git tag
-        shell: bash
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          # 1. Use 'python -m pip' to ensure it installs to the ACTIVE python environment
-          python -m pip install tomlkit
-          
-          # 2. Run the script
-          python - <<EOF
-          import tomlkit
-          import os
-          
-          tag = os.environ['TAG'].lstrip('v')
-          pyproject_file = "pyproject.toml"
-          
-          with open(pyproject_file, "r") as f:
-              doc = tomlkit.parse(f.read())
-          
-          doc["project"]["version"] = tag
-          
-          with open(pyproject_file, "w") as f:
-              f.write(tomlkit.dumps(doc))
-          EOF
-
       - name: Build package
         run: python -m build
 
@@ -69,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # Using a simpler name pattern for easier downloading
-          name: vllm-fit-${{ RAW_TAG }}${{ matrix.os }}-${{ matrix.python-version }}
+          name: vllm-fit-${{ github.ref_name }}${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/
 
   release:
