@@ -52,7 +52,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vllmfit-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.python-version }}
+          name: vllmfit-${{ github.ref_name | replace('v', '') }}-${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/
 
   release:
