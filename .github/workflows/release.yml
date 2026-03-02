@@ -63,4 +63,6 @@ jobs:
       - name: Run Semantic Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release --verbose publish
+        run: |
+          semantic-release version --push
+          semantic-release publish
