@@ -1,7 +1,7 @@
+import io
 import multiprocessing
 import os
 import sys
-import io
 from typing import Optional, Callable, List
 
 
