@@ -58,7 +58,7 @@ jobs:
       - name: Install build & release tools
         run: |
           python -m pip install --upgrade pip
-          pip install build python-semantic-release hatch
+          pip install build python-semantic-release
 
       - name: Run Semantic Release
         env:
