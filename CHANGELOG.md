@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.1.1 (2026-03-02)
+
+### Bug Fixes
+
+- Updated pyproject.toml
+  ([`6c3db3c`](https://github.com/jranaraki/vllm-fit/commit/6c3db3cb151202c3e41e2fc6fe967423775bce39))
+
+
 ## v0.1.0 (2026-03-02)
 
 ### Features
