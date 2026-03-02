@@ -15,11 +15,11 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
-[project.scripts]
-vllm-fit = "vllm_fit.cli:app"
-
 [project.optional-dependencies]
 dev = ["pytest>=7.0.0"]
+
+[project.scripts]
+vllm-fit = "vllm_fit.cli:app"
 
 [build-system]
 requires = ["hatchling"]
