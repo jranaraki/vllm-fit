@@ -1,7 +1,7 @@
 # vLLM-Fit
 
 <p align="center">
-    <img src="logo.png" alt="vllm-tuner" style="width:30%; height:auto;">
+    <img src="logo.png" alt="vllm-fit" style="width:30%; height:auto;">
 </p>
 
 A CLI tool designed to simply _recommend_ (conservative), and/or _profile_ (to maximize resource utilization) vLLM engine arguments for any HuggingFace model on the user's current hardware.
