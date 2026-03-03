@@ -148,7 +148,7 @@ If you find vllm-fit useful and interested in citing this work, please use the f
 ```
 @software{vllmfit2026,
   author = {Javad Anaraki},
-  title = {vllm-fit: vLLM arguments recommender and profiler for customer-grade hardware},
+  title = {vllm-fit: Hardware-Aware vLLM Argument Recommendation and Profiling},
   url = {https://github.com/jranaraki/vllm-fit},
   version = {0.1.1},
   year = {2026},
