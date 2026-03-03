@@ -141,6 +141,20 @@ Try:
 4. **Iteratively adjusts** memory, sequence length, and batch size until successful
 5. **Returns exact command** to run with optimal parameters
 
+## Citing
+
+If you find vllm-fit useful and interested in citing this work, please use the following BibTex entry:
+
+```
+@software{vllmfit2026,
+  author = {Javad Anaraki},
+  title = {vllm-fit: vLLM arguments recommender and profiler for customer-grade hardware},
+  url = {https://github.com/jranaraki/vllm-fit},
+  version = {0.1.1},
+  year = {2026},
+}
+```
+
 ## Acknowledgments
 
 - [llmfit](https://github.com/AlexsJones/llmfit) for the inspiration 
