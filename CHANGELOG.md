@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.2.0 (2026-03-11)
+
+### Features
+
+- Added support for quantized models | Improved the estimations, specifically for the smaller GPUs
+  (VRAM <= 4GB)
+  ([`ba30698`](https://github.com/jranaraki/vllm-fit/commit/ba306981210ed2852c156f8f9b431d71c2ccafb0))
+
+
 ## v0.1.1 (2026-03-02)
 
 ### Bug Fixes
