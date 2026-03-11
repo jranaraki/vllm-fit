@@ -1,4 +1,5 @@
 import time
+from typing import Optional
 
 import typer
 from rich import print
@@ -50,15 +51,19 @@ def _show_no_gpu_error():
 
 
 def _format_vllm_command(
-    model_id: str, params: dict, small_gpu: bool = False, enforce_eager: bool = False
+    model_id: str,
+    params: dict,
+    enforce_eager: bool = False,
+    config_repo_id: Optional[str] = None,
 ) -> str:
     cmd = f"vllm serve {model_id}"
     cmd += f" --gpu_memory_utilization {params['gpu_memory_utilization']}"
     cmd += f" --max_model_len {params['max_model_len']}"
     cmd += f" --tensor_parallel_size {params['tensor_parallel_size']}"
     cmd += f" --max_num_seqs {params['max_num_seqs']}"
-    if small_gpu:
-        cmd += " --disable-frontend-multiprocessing"
+    if config_repo_id and config_repo_id != model_id.split(":")[0]:
+        cmd += f" --hf-config-path {config_repo_id}"
+        cmd += f" --tokenizer {config_repo_id}"
     if enforce_eager:
         cmd += " --enforce-eager"
     return cmd
@@ -71,7 +76,7 @@ def recommend(model_id: str) -> None:
         _show_no_gpu_error()
         raise typer.Exit(1)
 
-    config = get_model_config(model_id)
+    config, config_repo_id = get_model_config(model_id)
     vram_info = get_vram_info()
 
     if not vram_info:
@@ -81,7 +86,7 @@ def recommend(model_id: str) -> None:
     total_vram = sum(vram_info.values())
     num_gpus = len(vram_info)
     small_gpu = total_vram < 8
-    params = estimate_parameters(config, total_vram, num_gpus)
+    params = estimate_parameters(config, total_vram, num_gpus, model_id)
 
     gpu_info = f"{total_vram:.1f} GB"
     if num_gpus > 1:
@@ -121,7 +126,7 @@ def recommend(model_id: str) -> None:
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
     print(
-        f"[dim]{_format_vllm_command(model_id, params, small_gpu, not params['can_fit'])}[/dim]"
+        f"[dim]{_format_vllm_command(model_id, params, not params['can_fit'] or params.get('enforce_eager', False), config_repo_id)}[/dim]"
     )
 
 
@@ -137,7 +142,7 @@ def profile(
         _show_no_gpu_error()
         raise typer.Exit(1)
 
-    config = get_model_config(model_id)
+    config, _ = get_model_config(model_id)
     vram_info = get_vram_info()
     gpuids = parse_gpu_ids(gpuid, vram_info)
 
@@ -149,7 +154,9 @@ def profile(
     num_gpus = len(gpuids)
     total_vram = sum(vram_info[gid] for gid in gpuids)
     small_gpu = total_vram / num_gpus < 8
-    initial_params = estimate_parameters(config, total_vram, num_gpus=num_gpus)
+    initial_params = estimate_parameters(
+        config, total_vram, num_gpus=num_gpus, model_id=model_id
+    )
     initial_params["gpu_ids"] = gpuids
 
     print(
@@ -209,7 +216,7 @@ def profile(
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
     print(
-        f"[dim]{_format_vllm_command(model_id, params, small_gpu, params.get('enforce_eager', False))}[/dim]"
+        f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False))}[/dim]"
     )
 
 
@@ -227,7 +234,7 @@ def serve(
 
     from vllm.entrypoints.openai.api_server import serve
 
-    config = get_model_config(model_id)
+    config, _ = get_model_config(model_id)
     vram_info = get_vram_info()
     gpuids = parse_gpu_ids(gpuid, vram_info)
 
@@ -239,7 +246,9 @@ def serve(
     num_gpus = len(gpuids)
     total_vram = sum(vram_info[gid] for gid in gpuids)
     small_gpu = total_vram / num_gpus < 8
-    initial_params = estimate_parameters(config, total_vram, num_gpus=num_gpus)
+    initial_params = estimate_parameters(
+        config, total_vram, num_gpus=num_gpus, model_id=model_id
+    )
     initial_params["gpu_ids"] = gpuids
 
     print(

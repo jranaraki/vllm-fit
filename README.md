@@ -141,6 +141,10 @@ Try:
 4. **Iteratively adjusts** memory, sequence length, and batch size until successful
 5. **Returns exact command** to run with optimal parameters
 
+## Notes
+
+1. For some of the older GGUF models on HuggingFace, there might be the ones that did not follow the naming convention accurately. Therefore, you might need to rename them before deployment. For instance, when you run `vllm-fit recommend Qwen/Qwen3-0.6B-GGUF:Q8_0`, the recommended arguments `vllm serve Qwen/Qwen3-0.6B-GGUF:Q8_0 --gpu_memory_utilization 0.65 --max_model_len 3914 --tensor_parallel_size 1 --max_num_seqs 8 --hf-config-path Qwen/Qwen3-0.6B --tokenizer Qwen/Qwen3-0.6B --enforce-eager` works just fine since the model name in the `~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B-GGUF/snapshots/23749fefcc72300e3a2ad315e1317431b06b590a` is as expected (see `Qwen3-0.6B-Q8_0.gguf`), where the quantization substring is `Q8_0`. However, when you run `vllm-fit recommend Qwen/Qwen2-0.5B-Instruct-GGUF:Q8_0`, although the provided recommendation is correct, `vllm serve Qwen/Qwen2-0.5B-Instruct-GGUF:Q8_0 --gpu_memory_utilization 0.65 --max_model_len 6098 --tensor_parallel_size 1 --max_num_seqs 8 --hf-config-path Qwen/Qwen2-0.5B-Instruct --tokenizer Qwen/Qwen2-0.5B-Instruct --enforce-eager`, since the downloaded model's name did not follow the naming convention, you will get this error from vLLM `ValueError: Downloaded GGUF files not found in /home/USER/.cache/huggingface/hub/models--Qwen--Qwen2-0.5B-Instruct-GGUF/snapshots/198f08841147e5196a6a69bd0053690fb1fd3857 for quant_type Q8_0` since the model name is `qwen2-0_5b-instruct-q8_0.gguf`. To fix this, rename the model, in the cache `/home/USER/.cache/huggingface/hub/models--Qwen--Qwen2-0.5B-Instruct-GGUF/snapshots/198f08841147e5196a6a69bd0053690fb1fd3857`, from `qwen2-0_5b-instruct-q8_0.gguf` to `qwen2-0_5b-instruct-Q8_0.gguf`. 
+
 ## Citing
 
 If you find vllm-fit useful and interested in citing this work, please use the following BibTex entry:
