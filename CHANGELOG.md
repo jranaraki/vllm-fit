@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.0 (2026-03-13)
+
+### Features
+
+- - Added CPU support for vLLM inference
+  ([`52920cc`](https://github.com/jranaraki/vllm-fit/commit/52920ccbc129db2ac1c6ee3064a35fd8bc1e1087))
+
+
 ## v0.2.0 (2026-03-11)
 
 ### Features
