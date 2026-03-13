@@ -6,9 +6,9 @@ from rich import print
 from rich.console import Console
 from rich.panel import Panel
 
-from .engine_tester import profile_parameters
-from .estimator import estimate_parameters
-from .hardware import get_vram_info, check_gpu_availability
+from .engine_tester import profile_parameters, profile_parameters_cpu
+from .estimator import estimate_parameters, estimate_parameters_cpu, is_gguf_model
+from .hardware import get_vram_info, check_hardware_availability, get_ram_info
 from .registry import get_model_config
 
 app = typer.Typer()
@@ -27,27 +27,13 @@ def parse_gpu_ids(gpuid: str, vram_info: dict) -> list[int]:
         return []
 
 
-def _show_no_gpu_error():
-    print("[red]❌ No GPU detected[/red]")
-    print()
-    print("[yellow]Required: NVIDIA GPU with CUDA support[/yellow]")
-    print()
-    print("[dim]Troubleshooting steps:[/dim]")
-    print("  1. Verify GPU is present: 'nvidia-smi' should list your GPU")
-    print(
-        "  2. Check PyTorch CUDA: python -c 'import torch; print(torch.cuda.is_available())'"
-    )
-    print(
-        "  3. Install PyTorch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu118"
-    )
-    print(
-        "  4. Update/install NVIDIA drivers from https://developer.nvidia.com/cuda-downloads"
-    )
-    print("  5. Check container GPU passthrough if using Docker/VM")
+def _show_no_hardware_error():
+    print("[red]❌ No compatible hardware detected[/red]")
     print()
     print("[dim]Alternatives:[/dim]")
-    print("  • Use cloud GPU services: RunPod, Lambda Labs, Google Colab, etc.")
-    print("  • Try CPU-only inference: HuggingFace Transformers pipeline")
+    print("  • GPU: Install NVIDIA drivers and CUDA")
+    print("  • CPU: Ensure sufficient RAM (16GB+ recommended)")
+    print("  • Cloud: Use RunPod, Lambda Labs, Google Colab")
 
 
 def _format_vllm_command(
@@ -55,55 +41,71 @@ def _format_vllm_command(
     params: dict,
     enforce_eager: bool = False,
     config_repo_id: Optional[str] = None,
+    hardware_type: str = "gpu",
 ) -> str:
     cmd = f"vllm serve {model_id}"
-    cmd += f" --gpu_memory_utilization {params['gpu_memory_utilization']}"
+
+    if hardware_type == "gpu":
+        cmd += f" --gpu_memory_utilization {params['gpu_memory_utilization']}"
+        cmd += f" --tensor_parallel_size {params['tensor_parallel_size']}"
+
     cmd += f" --max_model_len {params['max_model_len']}"
-    cmd += f" --tensor_parallel_size {params['tensor_parallel_size']}"
     cmd += f" --max_num_seqs {params['max_num_seqs']}"
+
     if config_repo_id and config_repo_id != model_id.split(":")[0]:
         cmd += f" --hf-config-path {config_repo_id}"
         cmd += f" --tokenizer {config_repo_id}"
+
     if enforce_eager:
         cmd += " --enforce-eager"
+
     return cmd
 
 
 @app.command()
 def recommend(model_id: str) -> None:
-    has_gpu, error_msg = check_gpu_availability()
-    if not has_gpu:
-        _show_no_gpu_error()
+    has_hardware, hardware_type, _ = check_hardware_availability()
+    if not has_hardware:
+        _show_no_hardware_error()
         raise typer.Exit(1)
 
     config, config_repo_id = get_model_config(model_id)
-    vram_info = get_vram_info()
 
-    if not vram_info:
-        _show_no_gpu_error()
-        raise typer.Exit(1)
+    if hardware_type == "cpu":
+        total_ram = get_ram_info()
+        params = estimate_parameters_cpu(config, total_ram, model_id)
+        print(f"CPU RAM: {total_ram:.1f} GB")
+        print()
+        print("[dim]Using CPU mode (no GPU detected)[/dim]")
+    else:
+        vram_info = get_vram_info()
+        if not vram_info:
+            _show_no_hardware_error()
+            raise typer.Exit(1)
 
-    total_vram = sum(vram_info.values())
-    num_gpus = len(vram_info)
-    small_gpu = total_vram < 8
-    params = estimate_parameters(config, total_vram, num_gpus, model_id)
+        total_vram = sum(vram_info.values())
+        num_gpus = len(vram_info)
+        params = estimate_parameters(config, total_vram, num_gpus, model_id)
 
-    gpu_info = f"{total_vram:.1f} GB"
-    if num_gpus > 1:
-        gpu_info += f" ({num_gpus}x ~{total_vram / num_gpus:.1f} GB each)"
-    print(f"GPU VRAM: {gpu_info}")
-    print()
+        gpu_info = f"{total_vram:.1f} GB"
+        if num_gpus > 1:
+            gpu_info += f" ({num_gpus}x ~{total_vram / num_gpus:.1f} GB each)"
+        print(f"GPU VRAM: {gpu_info}")
+        print()
 
     if not params["can_fit"]:
-        print("[red]⚠️  WARNING: Model may not fit in available GPU memory[/red]")
+        if hardware_type == "cpu":
+            print("[red]⚠️  WARNING: Model may not fit in available RAM[/red]")
+        else:
+            print("[red]⚠️  WARNING: Model may not fit in available GPU memory[/red]")
         print()
         for reason in params["recommendations"]:
-            if any(keyword in reason for keyword in ["exceed", "requirements"]):
+            if any(keyword in reason for keyword in ["exceed", "requires"]):
                 print(f"  [red]• {reason}[/red]")
         print()
         print("[yellow]Recommendations:[/yellow]")
         for rec in params["recommendations"]:
-            if not any(keyword in rec for keyword in ["exceed", "requirements"]):
+            if not any(keyword in rec for keyword in ["exceed", "requires"]):
                 print(f"  [dim]• {rec}[/dim]")
         print()
         print(
@@ -118,7 +120,8 @@ def recommend(model_id: str) -> None:
         )
     )
     print(f"model_id: {model_id}")
-    print(f"gpu_memory_utilization: {params['gpu_memory_utilization']}")
+    if hardware_type == "gpu":
+        print(f"gpu_memory_utilization: {params['gpu_memory_utilization']}")
     print(f"max_model_len: {params['max_model_len']}")
     print(f"tensor_parallel_size: {params['tensor_parallel_size']}")
     print(f"max_num_seqs: {params['max_num_seqs']}")
@@ -126,7 +129,7 @@ def recommend(model_id: str) -> None:
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
     print(
-        f"[dim]{_format_vllm_command(model_id, params, not params['can_fit'] or params.get('enforce_eager', False), config_repo_id)}[/dim]"
+        f"[dim]{_format_vllm_command(model_id, params, not params['can_fit'] or params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
     )
 
 
@@ -137,87 +140,151 @@ def profile(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
 ) -> None:
-    has_gpu, error_msg = check_gpu_availability()
-    if not has_gpu:
-        _show_no_gpu_error()
+    has_hardware, hardware_type, _ = check_hardware_availability()
+    if not has_hardware:
+        _show_no_hardware_error()
         raise typer.Exit(1)
 
-    config, _ = get_model_config(model_id)
-    vram_info = get_vram_info()
-    gpuids = parse_gpu_ids(gpuid, vram_info)
+    config, config_repo_id = get_model_config(model_id)
 
-    if not gpuids:
-        print("[red]No valid GPUs specified[/red]")
-        _show_no_gpu_error()
-        raise typer.Exit(1)
-
-    num_gpus = len(gpuids)
-    total_vram = sum(vram_info[gid] for gid in gpuids)
-    small_gpu = total_vram / num_gpus < 8
-    initial_params = estimate_parameters(
-        config, total_vram, num_gpus=num_gpus, model_id=model_id
-    )
-    initial_params["gpu_ids"] = gpuids
-
-    print(
-        f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
-    )
-    print("[yellow]🔍 Starting dynamic profiling...[/yellow]")
-    print()
-
-    start_time = time.time()
-
-    params = profile_parameters(
-        model_id,
-        initial_params,
-        progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
-    )
-
-    elapsed_time = time.time() - start_time
-    print()
-
-    if not params.get("profiling_success", False):
-        print("[red]⚠️  Profiling could not find a successful configuration[/red]")
-        print()
-        print("[yellow]Summary:[/yellow]")
-        print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
-        print(f"  • Time elapsed: {elapsed_time:.0f}s")
-        if params.get("enforce_eager", False):
-            print(
-                "  • Strategy: Enabled --enforce-eager to reduce memory (disabled torch.compile)"
-            )
-        print("  • Parameters below are our best attempt")
-        print()
-    else:
-        print("[green]✓ Profiling completed successfully![/green]")
-        print()
-        print("[yellow]Summary:[/yellow]")
-        print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
+    if hardware_type == "cpu":
+        total_ram = get_ram_info()
+        print(f"[yellow]Using CPU mode ({total_ram:.1f} GB RAM)[/yellow]")
+        print("[yellow]🔍 Starting simplified profiling...[/yellow]")
         print(
-            f"  • Final test: Memory={params['gpu_memory_utilization']}, Len={params['max_model_len']}"
+            "[dim]Note: CPU profiling is slower and uses conservative estimates[/dim]"
         )
-        if params.get("enforce_eager", False):
-            print("  • Strategy: Used --enforce-eager mode for memory efficiency")
-        print(f"  • Time elapsed: {elapsed_time:.0f}s")
         print()
 
-    print(
-        Panel(
-            f"[bold green]Optimized Parameters[/bold green]", title="Dynamic Profiling"
+        start_time = time.time()
+
+        initial_params = estimate_parameters_cpu(config, total_ram, model_id)
+        params = profile_parameters_cpu(
+            model_id,
+            initial_params,
+            progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
         )
-    )
-    print(f"model_id: {model_id}")
-    print(f"gpu_memory_utilization: {params['gpu_memory_utilization']}")
-    print(f"max_model_len: {params['max_model_len']}")
-    print(f"tensor_parallel_size: {params['tensor_parallel_size']}")
-    print(f"max_num_seqs: {params['max_num_seqs']}")
-    if params.get("enforce_eager", False):
-        print(f"enforce_eager: True")
-    print()
-    print("[bold cyan]Run this command:[/bold cyan]")
-    print(
-        f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False))}[/dim]"
-    )
+
+        elapsed_time = time.time() - start_time
+        print()
+
+        if not params.get("profiling_success", False):
+            print("[red]⚠️  Profiling could not find a successful configuration[/red]")
+            print()
+            print("[yellow]Summary:[/yellow]")
+            print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
+            print(f"  • Time elapsed: {elapsed_time:.0f}s")
+            if params.get("enforce_eager", False):
+                print(
+                    "  • Strategy: Enabled --enforce-eager to reduce memory (disabled torch.compile)"
+                )
+            print("  • Parameters below are our best attempt")
+            print()
+        else:
+            print("[green]✓ Profiling completed successfully![/green]")
+            print()
+            print("[yellow]Summary:[/yellow]")
+            print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
+            print(f"  • Final test: Len={params['max_model_len']}")
+            if params.get("enforce_eager", False):
+                print("  • Strategy: Used --enforce-eager mode for memory efficiency")
+            print(f"  • Time elapsed: {elapsed_time:.0f}s")
+            print()
+
+        print(
+            Panel(
+                f"[bold green]Optimized Parameters[/bold green]",
+                title="Dynamic Profiling",
+            )
+        )
+        print(f"model_id: {model_id}")
+        print(f"max_model_len: {params['max_model_len']}")
+        print(f"tensor_parallel_size: {params['tensor_parallel_size']}")
+        print(f"max_num_seqs: {params['max_num_seqs']}")
+        if params.get("enforce_eager", False):
+            print(f"enforce_eager: True")
+        print()
+        print("[bold cyan]Run this command:[/bold cyan]")
+        print(
+            f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
+        )
+    else:
+        vram_info = get_vram_info()
+        gpuids = parse_gpu_ids(gpuid, vram_info)
+
+        if not gpuids:
+            print("[red]No valid GPUs specified[/red]")
+            _show_no_hardware_error()
+            raise typer.Exit(1)
+
+        num_gpus = len(gpuids)
+        total_vram = sum(vram_info[gid] for gid in gpuids)
+        small_gpu = total_vram / num_gpus < 8
+        initial_params = estimate_parameters(
+            config, total_vram, num_gpus=num_gpus, model_id=model_id
+        )
+        initial_params["gpu_ids"] = gpuids
+
+        print(
+            f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
+        )
+        print("[yellow]🔍 Starting dynamic profiling...[/yellow]")
+        print()
+
+        start_time = time.time()
+
+        params = profile_parameters(
+            model_id,
+            initial_params,
+            progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
+        )
+
+        elapsed_time = time.time() - start_time
+        print()
+
+        if not params.get("profiling_success", False):
+            print("[red]⚠️  Profiling could not find a successful configuration[/red]")
+            print()
+            print("[yellow]Summary:[/yellow]")
+            print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
+            print(f"  • Time elapsed: {elapsed_time:.0f}s")
+            if params.get("enforce_eager", False):
+                print(
+                    "  • Strategy: Enabled --enforce-eager to reduce memory (disabled torch.compile)"
+                )
+            print("  • Parameters below are our best attempt")
+            print()
+        else:
+            print("[green]✓ Profiling completed successfully![/green]")
+            print()
+            print("[yellow]Summary:[/yellow]")
+            print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
+            print(
+                f"  • Final test: Memory={params['gpu_memory_utilization']}, Len={params['max_model_len']}"
+            )
+            if params.get("enforce_eager", False):
+                print("  • Strategy: Used --enforce-eager mode for memory efficiency")
+            print(f"  • Time elapsed: {elapsed_time:.0f}s")
+            print()
+
+        print(
+            Panel(
+                f"[bold green]Optimized Parameters[/bold green]",
+                title="Dynamic Profiling",
+            )
+        )
+        print(f"model_id: {model_id}")
+        print(f"gpu_memory_utilization: {params['gpu_memory_utilization']}")
+        print(f"max_model_len: {params['max_model_len']}")
+        print(f"tensor_parallel_size: {params['tensor_parallel_size']}")
+        print(f"max_num_seqs: {params['max_num_seqs']}")
+        if params.get("enforce_eager", False):
+            print(f"enforce_eager: True")
+        print()
+        print("[bold cyan]Run this command:[/bold cyan]")
+        print(
+            f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
+        )
 
 
 @app.command()
@@ -227,54 +294,80 @@ def serve(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
 ) -> None:
-    has_gpu, error_msg = check_gpu_availability()
-    if not has_gpu:
-        _show_no_gpu_error()
+    has_hardware, hardware_type, _ = check_hardware_availability()
+    if not has_hardware:
+        _show_no_hardware_error()
         raise typer.Exit(1)
 
     from vllm.entrypoints.openai.api_server import serve
-
-    config, _ = get_model_config(model_id)
-    vram_info = get_vram_info()
-    gpuids = parse_gpu_ids(gpuid, vram_info)
-
-    if not gpuids:
-        print("[red]No valid GPUs specified[/red]")
-        _show_no_gpu_error()
-        raise typer.Exit(1)
-
-    num_gpus = len(gpuids)
-    total_vram = sum(vram_info[gid] for gid in gpuids)
-    small_gpu = total_vram / num_gpus < 8
-    initial_params = estimate_parameters(
-        config, total_vram, num_gpus=num_gpus, model_id=model_id
-    )
-    initial_params["gpu_ids"] = gpuids
-
-    print(
-        f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
-    )
-    print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
-    print()
-
-    params = profile_parameters(
-        model_id,
-        initial_params,
-        progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
-    )
-
-    print()
-    print("[green]Starting vLLM server with optimal parameters[/green]")
-    print()
     import uvicorn
 
-    uvicorn.run(
-        lambda: serve(
-            model=model_id,
-            gpu_memory_utilization=params["gpu_memory_utilization"],
-            max_model_len=params["max_model_len"],
-            tensor_parallel_size=params["tensor_parallel_size"],
-            max_num_seqs=params["max_num_seqs"],
-            enforce_eager=params.get("enforce_eager", False),
+    config, config_repo_id = get_model_config(model_id)
+
+    if hardware_type == "cpu":
+        total_ram = get_ram_info()
+        print(f"[yellow]Using CPU mode ({total_ram:.1f} GB RAM)[/yellow]")
+        print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
+        print()
+
+        initial_params = estimate_parameters_cpu(config, total_ram, model_id)
+        params = profile_parameters_cpu(
+            model_id,
+            initial_params,
+            progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
         )
-    )
+
+        print()
+        print("[green]Starting vLLM server with optimal parameters on CPU...[/green]")
+        print()
+
+        uvicorn.run(
+            lambda: serve(
+                model=model_id,
+                max_model_len=params["max_model_len"],
+                max_num_seqs=params["max_num_seqs"],
+                enforce_eager=params.get("enforce_eager", False),
+            )
+        )
+    else:
+        vram_info = get_vram_info()
+        gpuids = parse_gpu_ids(gpuid, vram_info)
+
+        if not gpuids:
+            print("[red]No valid GPUs specified[/red]")
+            _show_no_hardware_error()
+            raise typer.Exit(1)
+
+        num_gpus = len(gpuids)
+        total_vram = sum(vram_info[gid] for gid in gpuids)
+        initial_params = estimate_parameters(
+            config, total_vram, num_gpus=num_gpus, model_id=model_id
+        )
+        initial_params["gpu_ids"] = gpuids
+
+        print(
+            f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
+        )
+        print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
+        print()
+
+        params = profile_parameters(
+            model_id,
+            initial_params,
+            progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
+        )
+
+        print()
+        print("[green]Starting vLLM server with optimal parameters[/green]")
+        print()
+
+        uvicorn.run(
+            lambda: serve(
+                model=model_id,
+                gpu_memory_utilization=params["gpu_memory_utilization"],
+                max_model_len=params["max_model_len"],
+                tensor_parallel_size=params["tensor_parallel_size"],
+                max_num_seqs=params["max_num_seqs"],
+                enforce_eager=params.get("enforce_eager", False),
+            )
+        )

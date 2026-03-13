@@ -1,7 +1,7 @@
 import json
 from typing import Dict, Any, Tuple, Optional
 
-from huggingface_hub import hf_hub_download, HfApi
+from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 
 

@@ -48,6 +48,21 @@ def get_vram_info() -> Dict[int, float]:
     return vram_info
 
 
+def get_ram_info() -> float:
+    import psutil
+
+    return psutil.virtual_memory().total / (1024**3)
+
+
+def check_hardware_availability() -> Tuple[bool, Optional[str], Optional[str]]:
+    vram_info = get_vram_info()
+
+    if vram_info:
+        return True, "gpu", None
+
+    return True, "cpu", None
+
+
 def check_gpu_availability() -> Tuple[bool, Optional[str]]:
     vram_info = get_vram_info()
 

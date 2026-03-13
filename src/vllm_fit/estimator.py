@@ -62,6 +62,79 @@ def get_bytes_per_param(config: Dict[str, Any], model_id: str = "") -> float:
     return bits / 8.0
 
 
+def estimate_parameters_cpu(
+    config: Dict[str, Any], total_ram: float, model_id: str = ""
+) -> Dict[str, Any]:
+    hidden_size = config.get("hidden_size", 4096)
+    num_layers = config.get("num_hidden_layers", 32)
+    num_attention_heads = config.get("num_attention_heads", 32)
+    vocab_size = config.get("vocab_size", 32000)
+
+    param_count = config.get("num_parameters") or config.get("num_params")
+    if not param_count:
+        n_embed = config.get("n_embd", hidden_size)
+        intermediate_size = config.get("intermediate_size", n_embed * 4)
+
+        embedding_params = vocab_size * n_embed
+        attn_params = num_layers * (4 * n_embed * n_embed)
+        mlp_params = num_layers * (2 * n_embed * intermediate_size)
+        ln_params = num_layers * 5 * n_embed
+
+        param_count = embedding_params + attn_params + mlp_params + ln_params
+        param_count = int(param_count * 1.5)
+
+    bytes_per_param = get_bytes_per_param(config, model_id)
+    weights_memory_gb = param_count * bytes_per_param / (1024**3)
+
+    activation_buffer_gb = max(0.5, hidden_size * num_layers / (1024**3) * 3)
+
+    reserved_gb = max(2.0, total_ram * 0.15)
+
+    tensor_parallel_size = 1
+
+    max_model_len = 512 if total_ram >= 16 else 256
+
+    max_num_seqs = 4
+
+    total_required_gb = weights_memory_gb + activation_buffer_gb + reserved_gb
+
+    can_fit = True
+    recommendations = []
+
+    if total_required_gb > total_ram * 0.7:
+        can_fit = False
+        recommendations.append(
+            f"Model requires {total_required_gb:.2f} GB RAM but only {total_ram:.1f} GB available"
+        )
+
+    enforce_eager = True
+
+    if not is_gguf_model(model_id):
+        recommendations.append("Consider using GGUF format for better CPU performance")
+
+    if not can_fit:
+        if not is_model_quantized(config, model_id):
+            recommendations.append(
+                "Consider using a quantized version of the model (e.g., AWQ, GPTQ, 4-bit/8-bit)"
+            )
+        recommendations.append("Try a smaller model variant (e.g., 0.5B instead of 7B)")
+
+    return {
+        "gpu_memory_utilization": None,
+        "max_model_len": max_model_len,
+        "tensor_parallel_size": tensor_parallel_size,
+        "max_num_seqs": max_num_seqs,
+        "estimated_weights_memory_gb": round(weights_memory_gb, 2),
+        "per_gpu_weights_gb": round(weights_memory_gb, 2),
+        "activation_memory_gb": round(activation_buffer_gb, 2),
+        "compile_workspace_gb": 0.0,
+        "min_required_memory_gb": round(total_required_gb, 2),
+        "can_fit": can_fit,
+        "enforce_eager": enforce_eager,
+        "recommendations": recommendations,
+    }
+
+
 def estimate_parameters(
     config: Dict[str, Any], total_vram: float, num_gpus: int = 1, model_id: str = ""
 ) -> Dict[str, Any]:
@@ -73,7 +146,6 @@ def estimate_parameters(
     param_count = config.get("num_parameters") or config.get("num_params")
     if not param_count:
         n_embed = config.get("n_embd", hidden_size)
-        n_head = config.get("n_head", num_attention_heads)
         intermediate_size = config.get("intermediate_size", n_embed * 4)
 
         embedding_params = vocab_size * n_embed

@@ -2,7 +2,72 @@ import io
 import multiprocessing
 import os
 import sys
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Tuple
+
+
+def _test_engine_worker_cpu(
+    model_id: str,
+    max_model_len: int,
+    max_num_seqs: int,
+    enforce_eager: bool = False,
+) -> int:
+    os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+
+    devnull = open(os.devnull, "w")
+    os.dup2(devnull.fileno(), 1)
+    os.dup2(devnull.fileno(), 2)
+    sys.stdout = devnull
+    sys.stderr = devnull
+
+    from vllm import LLM
+
+    llm = LLM(
+        model=model_id,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        enforce_eager=enforce_eager,
+    )
+    devnull.close()
+    return max_num_seqs
+
+
+def _test_configuration_cpu(
+    model_id: str,
+    max_model_len: int,
+    max_num_seqs: int,
+    enforce_eager: bool,
+    timeout: int = 600,
+) -> Tuple[bool, bool]:
+    ctx = multiprocessing.get_context("spawn")
+    p = ctx.Process(
+        target=_test_engine_worker_cpu,
+        args=(
+            model_id,
+            max_model_len,
+            max_num_seqs,
+            enforce_eager,
+        ),
+    )
+
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
+
+    p.start()
+    p.join(timeout=timeout)
+
+    sys.stdout = old_stdout
+    sys.stderr = old_stderr
+
+    if p.is_alive():
+        p.terminate()
+        return False, True
+
+    if p.exitcode == 0:
+        return True, False
+
+    return False, False
 
 
 def _test_engine_worker(
@@ -66,18 +131,16 @@ def _test_configuration(
         ),
     )
 
-    devnull = io.StringIO()
     old_stdout = sys.stdout
     old_stderr = sys.stderr
-    sys.stdout = devnull
-    sys.stderr = devnull
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
 
     p.start()
     p.join(timeout=timeout)
 
     sys.stdout = old_stdout
     sys.stderr = old_stderr
-    devnull.close()
 
     if p.is_alive():
         p.terminate()
@@ -331,3 +394,150 @@ def profile_parameters(
             os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible
         else:
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
+
+def profile_parameters_cpu(
+    model_id: str,
+    initial_params: dict,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> dict:
+    max_model_len = initial_params["max_model_len"]
+    max_num_seqs = initial_params["max_num_seqs"]
+    enforce_eager = initial_params["enforce_eager"]
+    total_attempts = 0
+
+    def _log_attempt(msg: str):
+        nonlocal total_attempts
+        total_attempts += 1
+        if progress_callback:
+            progress_callback(f"Attempt {total_attempts} • {msg}")
+
+    try:
+        _log_attempt(
+            f"Len={max_model_len} • Seqs={max_num_seqs} • Eager={'ON' if enforce_eager else 'OFF'}"
+        )
+
+        success, timeout = _test_configuration_cpu(
+            model_id,
+            max_model_len,
+            max_num_seqs,
+            enforce_eager,
+        )
+
+        if not success and not enforce_eager:
+            if progress_callback:
+                progress_callback("[red]✗ Initial config failed[/red]")
+
+            enforce_eager = True
+            _log_attempt(
+                f"Enabling enforce_eager: Len={max_model_len} • Seqs={max_num_seqs} • Eager=ON"
+            )
+
+            success, timeout = _test_configuration_cpu(
+                model_id,
+                max_model_len,
+                max_num_seqs,
+                enforce_eager,
+            )
+
+        if not success:
+            if progress_callback:
+                progress_callback("[yellow]Finding baseline configuration...[/yellow]")
+
+            while not success:
+                if max_model_len > 128:
+                    previous_len = max_model_len
+                    max_model_len = max(128, int(max_model_len * 0.6))
+                    if progress_callback:
+                        progress_callback(
+                            f"[yellow]  Reducing Len {previous_len} → {max_model_len}[/yellow]"
+                        )
+                else:
+                    if progress_callback:
+                        progress_callback(
+                            "[red]Cannot find working configuration[/red]"
+                        )
+                    break
+
+                _log_attempt(
+                    f"Baseline: Len={max_model_len} • Seqs={max_num_seqs} • Eager=ON"
+                )
+
+                success, timeout = _test_configuration_cpu(
+                    model_id,
+                    max_model_len,
+                    max_num_seqs,
+                    enforce_eager,
+                )
+
+        if not success:
+            if progress_callback:
+                progress_callback("[red]✗ No configuration found[/red]")
+            return {
+                "gpu_memory_utilization": None,
+                "max_model_len": max_model_len,
+                "tensor_parallel_size": 1,
+                "max_num_seqs": max_num_seqs,
+                "enforce_eager": enforce_eager,
+                "profiling_success": False,
+                "attempts_made": total_attempts,
+            }
+
+        if progress_callback:
+            progress_callback("[green]✓ Baseline found![/green]")
+            progress_callback(
+                "[cyan]Optimizing parameters with binary search...[/cyan]"
+            )
+
+        low = max(256, int(max_model_len * 0.5))
+        high = min(2048, max_model_len * 2)
+        best = max_model_len
+
+        while low <= high:
+            mid = (low + high) // 2
+
+            if progress_callback:
+                progress_callback(
+                    f"  Binary search Len: testing {mid} (range {low}-{high})"
+                )
+
+            success, timeout = _test_configuration_cpu(
+                model_id,
+                mid,
+                max_num_seqs,
+                enforce_eager,
+            )
+
+            if success and not timeout:
+                best = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        max_model_len = best
+
+        if progress_callback:
+            progress_callback("[green]✓ Optimization complete![/green]")
+
+        return {
+            "gpu_memory_utilization": None,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": 1,
+            "max_num_seqs": max_num_seqs,
+            "enforce_eager": enforce_eager,
+            "profiling_success": True,
+            "attempts_made": total_attempts,
+        }
+
+    except KeyboardInterrupt:
+        if progress_callback:
+            progress_callback("[yellow]Profiling interrupted by user[/yellow]")
+        return {
+            "gpu_memory_utilization": None,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": 1,
+            "max_num_seqs": max_num_seqs,
+            "enforce_eager": enforce_eager,
+            "profiling_success": False,
+            "attempts_made": total_attempts,
+        }
