@@ -24,11 +24,7 @@ uv pip install git+https://github.com/jranaraki/vllm-fit
 Get instant parameter recommendations:
 
 ```bash
-# GPU mode (auto-detected when GPU is available)
 vllm-fit recommend Qwen/Qwen2.5-7B-Instruct
-
-# CPU mode (auto-detected when no GPU is available)
-vllm-fit recommend Qwen/Qwen2.5-0.5B-Instruct
 ```
 
 Profile to find actual memory limits:
