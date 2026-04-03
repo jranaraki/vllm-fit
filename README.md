@@ -64,7 +64,30 @@ Use `--gpuid` to control which GPUs are used:
 
 ## Output
 
-After profiling, you get:
+### `recommend`
+
+Running `vllm-fit recommend Qwen/Qwen3-0.6B` generates the following output:
+
+```
+GPU VRAM: 4.0 GB
+
+╭────────────────────────────────── Static Estimation ──────────────────────────────────╮
+│ Recommended Parameters                                                                │                                                                                                                                                          │
+╰───────────────────────────────────────────────────────────────────────────────────────╯
+model_id: Qwen/Qwen3-0.6B
+gpu_memory_utilization: 0.65
+max_model_len: 2444
+tensor_parallel_size: 1
+max_num_seqs: 8
+estimated_weights_memory_gb: 1.26
+
+Run this command:
+vllm serve Qwen/Qwen3-0.6B --gpu_memory_utilization 0.65 --tensor_parallel_size 1 --max_model_len 2444 --max_num_seqs 8
+```
+
+### `profile`
+
+Running `vllm-fit profile Qwen/Qwen2.5-7B-Instruct` generates the following output:
 
 ```
 ✓ Profiling completed successfully!
