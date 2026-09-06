@@ -1,5 +1,5 @@
 import time
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich import print
@@ -8,7 +8,7 @@ from rich.panel import Panel
 
 from .engine_tester import profile_parameters, profile_parameters_cpu
 from .estimator import estimate_parameters, estimate_parameters_cpu, is_gguf_model
-from .hardware import get_vram_info, check_hardware_availability, get_ram_info
+from .hardware import get_vram_info, detect_hardware, get_ram_info
 from .registry import get_model_config
 
 app = typer.Typer()
@@ -36,6 +36,33 @@ def _show_no_hardware_error():
     print("  • Cloud: Use RunPod, Lambda Labs, Google Colab")
 
 
+def _build_vllm_args(
+    model_id: str,
+    params: dict,
+    enforce_eager: bool = False,
+    config_repo_id: Optional[str] = None,
+    hardware_type: str = "gpu",
+) -> List[str]:
+    """Build the `vllm serve` argument list for the given parameters."""
+    args = ["vllm", "serve", model_id]
+
+    if hardware_type == "gpu":
+        args += ["--gpu_memory_utilization", str(params["gpu_memory_utilization"])]
+        args += ["--tensor_parallel_size", str(params["tensor_parallel_size"])]
+
+    args += ["--max_model_len", str(params["max_model_len"])]
+    args += ["--max_num_seqs", str(params["max_num_seqs"])]
+
+    if config_repo_id and config_repo_id != model_id.split(":")[0]:
+        args += ["--hf-config-path", config_repo_id]
+        args += ["--tokenizer", config_repo_id]
+
+    if enforce_eager:
+        args.append("--enforce-eager")
+
+    return args
+
+
 def _format_vllm_command(
     model_id: str,
     params: dict,
@@ -43,31 +70,21 @@ def _format_vllm_command(
     config_repo_id: Optional[str] = None,
     hardware_type: str = "gpu",
 ) -> str:
-    cmd = f"vllm serve {model_id}"
-
-    if hardware_type == "gpu":
-        cmd += f" --gpu_memory_utilization {params['gpu_memory_utilization']}"
-        cmd += f" --tensor_parallel_size {params['tensor_parallel_size']}"
-
-    cmd += f" --max_model_len {params['max_model_len']}"
-    cmd += f" --max_num_seqs {params['max_num_seqs']}"
-
-    if config_repo_id and config_repo_id != model_id.split(":")[0]:
-        cmd += f" --hf-config-path {config_repo_id}"
-        cmd += f" --tokenizer {config_repo_id}"
-
-    if enforce_eager:
-        cmd += " --enforce-eager"
-
-    return cmd
+    return " ".join(
+        _build_vllm_args(
+            model_id, params, enforce_eager, config_repo_id, hardware_type
+        )
+    )
 
 
 @app.command()
-def recommend(model_id: str) -> None:
-    has_hardware, hardware_type, _ = check_hardware_availability()
-    if not has_hardware:
-        _show_no_hardware_error()
-        raise typer.Exit(1)
+def recommend(
+    model_id: str,
+    gpuid: str = typer.Option(
+        "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
+    ),
+) -> None:
+    hardware_type = detect_hardware()
 
     config, config_repo_id = get_model_config(model_id)
 
@@ -79,12 +96,14 @@ def recommend(model_id: str) -> None:
         print("[dim]Using CPU mode (no GPU detected)[/dim]")
     else:
         vram_info = get_vram_info()
-        if not vram_info:
+        gpuids = parse_gpu_ids(gpuid, vram_info)
+        if not gpuids:
+            print("[red]No valid GPUs specified[/red]")
             _show_no_hardware_error()
             raise typer.Exit(1)
 
-        total_vram = sum(vram_info.values())
-        num_gpus = len(vram_info)
+        total_vram = sum(vram_info[gid] for gid in gpuids)
+        num_gpus = len(gpuids)
         params = estimate_parameters(config, total_vram, num_gpus, model_id)
 
         gpu_info = f"{total_vram:.1f} GB"
@@ -140,10 +159,7 @@ def profile(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
 ) -> None:
-    has_hardware, hardware_type, _ = check_hardware_availability()
-    if not has_hardware:
-        _show_no_hardware_error()
-        raise typer.Exit(1)
+    hardware_type = detect_hardware()
 
     config, config_repo_id = get_model_config(model_id)
 
@@ -294,15 +310,14 @@ def serve(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
 ) -> None:
-    has_hardware, hardware_type, _ = check_hardware_availability()
-    if not has_hardware:
-        _show_no_hardware_error()
-        raise typer.Exit(1)
+    import os
+    import subprocess
 
-    from vllm.entrypoints.openai.api_server import serve
-    import uvicorn
+    hardware_type = detect_hardware()
 
     config, config_repo_id = get_model_config(model_id)
+
+    env = os.environ.copy()
 
     if hardware_type == "cpu":
         total_ram = get_ram_info()
@@ -315,19 +330,6 @@ def serve(
             model_id,
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
-        )
-
-        print()
-        print("[green]Starting vLLM server with optimal parameters on CPU...[/green]")
-        print()
-
-        uvicorn.run(
-            lambda: serve(
-                model=model_id,
-                max_model_len=params["max_model_len"],
-                max_num_seqs=params["max_num_seqs"],
-                enforce_eager=params.get("enforce_eager", False),
-            )
         )
     else:
         vram_info = get_vram_info()
@@ -356,18 +358,33 @@ def serve(
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
         )
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpuids))
 
+    if not params.get("profiling_success", False):
         print()
-        print("[green]Starting vLLM server with optimal parameters[/green]")
-        print()
-
-        uvicorn.run(
-            lambda: serve(
-                model=model_id,
-                gpu_memory_utilization=params["gpu_memory_utilization"],
-                max_model_len=params["max_model_len"],
-                tensor_parallel_size=params["tensor_parallel_size"],
-                max_num_seqs=params["max_num_seqs"],
-                enforce_eager=params.get("enforce_eager", False),
-            )
+        print(
+            "[red]Profiling did not find a working configuration; not starting the server.[/red]"
         )
+        raise typer.Exit(1)
+
+    cmd = _build_vllm_args(
+        model_id,
+        params,
+        params.get("enforce_eager", False),
+        config_repo_id,
+        hardware_type,
+    )
+
+    print()
+    print("[green]Starting vLLM server with optimal parameters[/green]")
+    print(f"[dim]{' '.join(cmd)}[/dim]")
+    print()
+
+    try:
+        raise typer.Exit(subprocess.call(cmd, env=env))
+    except FileNotFoundError:
+        print(
+            "[red]Could not find the 'vllm' executable on PATH.[/red] "
+            "Install vLLM (e.g. `uv pip install vllm`) and ensure it is available."
+        )
+        raise typer.Exit(1)
