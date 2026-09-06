@@ -26,6 +26,17 @@ def is_awq_quantized(config: Dict[str, Any]) -> bool:
     return "awq" in quant_method.lower()
 
 
+def _dtype_bytes(config: Dict[str, Any]) -> float:
+    """Bytes per weight for an unquantized model, based on the config dtype."""
+    dtype = str(config.get("torch_dtype") or config.get("dtype") or "").lower()
+    if dtype in ("float32", "float", "fp32"):
+        return 4.0
+    if dtype in ("float16", "half", "fp16", "bfloat16", "bf16"):
+        return 2.0
+    # Default to fp16 (the common serving dtype) when unspecified.
+    return 2.0
+
+
 def get_bytes_per_param(config: Dict[str, Any], model_id: str = "") -> float:
     quant_config = config.get("quantization_config", {})
 
@@ -36,7 +47,7 @@ def get_bytes_per_param(config: Dict[str, Any], model_id: str = "") -> float:
             if match:
                 bits = int(match.group(1) if match.group(1) else match.group(2))
                 return bits / 8.0
-        return 2.0
+        return _dtype_bytes(config)
 
     bits = quant_config.get("bits", None)
     if bits is not None:
@@ -62,31 +73,61 @@ def get_bytes_per_param(config: Dict[str, Any], model_id: str = "") -> float:
     return bits / 8.0
 
 
+# MLP activations that are NOT gated (2-matrix MLP); everything else is
+# assumed to be a gated MLP (SwiGLU-style, 3 matrices), which covers most
+# modern LLMs (Llama, Qwen, Mistral, ...).
+_NON_GATED_ACTS = {"gelu", "gelu_new", "gelu_fast", "quick_gelu", "relu"}
+
+
+def _estimate_param_count(config: Dict[str, Any]) -> int:
+    """Estimate total parameter count from architecture fields.
+
+    Accounts for gated MLPs (3 matrices) and grouped-query attention
+    (fewer KV heads), then applies a small buffer for the terms not
+    modelled explicitly (biases, norms, tied/untied heads).
+    """
+    param_count = config.get("num_parameters") or config.get("num_params")
+    if param_count:
+        return int(param_count)
+
+    n_embed = config.get("hidden_size") or config.get("n_embd", 4096)
+    num_layers = config.get("num_hidden_layers", 32)
+    num_heads = config.get("num_attention_heads", 32)
+    num_kv_heads = config.get("num_key_value_heads", num_heads)
+    head_dim = config.get("head_dim") or (n_embed // num_heads if num_heads else n_embed)
+    vocab_size = config.get("vocab_size", 32000)
+    intermediate_size = config.get("intermediate_size", n_embed * 4)
+
+    kv_dim = num_kv_heads * head_dim
+    q_dim = num_heads * head_dim
+
+    embedding_params = vocab_size * n_embed
+    # Q and O projections are full width; K and V shrink under GQA.
+    attn_params = num_layers * (2 * n_embed * q_dim + 2 * n_embed * kv_dim)
+
+    hidden_act = str(config.get("hidden_act", "")).lower()
+    mlp_matrices = 2 if hidden_act in _NON_GATED_ACTS else 3
+    mlp_params = num_layers * (mlp_matrices * n_embed * intermediate_size)
+
+    ln_params = num_layers * 5 * n_embed
+
+    param_count = embedding_params + attn_params + mlp_params + ln_params
+    # Small buffer for unmodelled parameters; calibrated so Llama-2-7B
+    # lands near its true ~6.7B parameters.
+    return int(param_count * 1.1)
+
+
 def estimate_parameters_cpu(
     config: Dict[str, Any], total_ram: float, model_id: str = ""
 ) -> Dict[str, Any]:
-    hidden_size = config.get("hidden_size", 4096)
-    num_layers = config.get("num_hidden_layers", 32)
-    num_attention_heads = config.get("num_attention_heads", 32)
-    vocab_size = config.get("vocab_size", 32000)
-
-    param_count = config.get("num_parameters") or config.get("num_params")
-    if not param_count:
-        n_embed = config.get("n_embd", hidden_size)
-        intermediate_size = config.get("intermediate_size", n_embed * 4)
-
-        embedding_params = vocab_size * n_embed
-        attn_params = num_layers * (4 * n_embed * n_embed)
-        mlp_params = num_layers * (2 * n_embed * intermediate_size)
-        ln_params = num_layers * 5 * n_embed
-
-        param_count = embedding_params + attn_params + mlp_params + ln_params
-        param_count = int(param_count * 1.5)
+    param_count = _estimate_param_count(config)
 
     bytes_per_param = get_bytes_per_param(config, model_id)
     weights_memory_gb = param_count * bytes_per_param / (1024**3)
 
-    activation_buffer_gb = max(0.5, hidden_size * num_layers / (1024**3) * 3)
+    # Runtime activation/workspace scales with model size; use a small
+    # fraction of the weights footprint with a sensible floor.
+    activation_buffer_gb = max(0.5, weights_memory_gb * 0.1)
 
     reserved_gb = max(2.0, total_ram * 0.15)
 
@@ -141,20 +182,12 @@ def estimate_parameters(
     hidden_size = config.get("hidden_size", 4096)
     num_layers = config.get("num_hidden_layers", 32)
     num_attention_heads = config.get("num_attention_heads", 32)
-    vocab_size = config.get("vocab_size", 32000)
+    num_kv_heads = config.get("num_key_value_heads", num_attention_heads)
+    head_dim = config.get("head_dim") or (
+        hidden_size // num_attention_heads if num_attention_heads else hidden_size
+    )
 
-    param_count = config.get("num_parameters") or config.get("num_params")
-    if not param_count:
-        n_embed = config.get("n_embd", hidden_size)
-        intermediate_size = config.get("intermediate_size", n_embed * 4)
-
-        embedding_params = vocab_size * n_embed
-        attn_params = num_layers * (4 * n_embed * n_embed)
-        mlp_params = num_layers * (2 * n_embed * intermediate_size)
-        ln_params = num_layers * 5 * n_embed
-
-        param_count = embedding_params + attn_params + mlp_params + ln_params
-        param_count = int(param_count * 1.5)
+    param_count = _estimate_param_count(config)
 
     bytes_per_param = get_bytes_per_param(config, model_id)
     weights_memory_gb = param_count * bytes_per_param / (1024**3)
@@ -163,11 +196,17 @@ def estimate_parameters(
     if is_awq_quantized(config) and total_vram <= 6:
         weights_memory_gb += 0.2
 
-    kv_cache_per_token_gb = (2 * num_layers * num_attention_heads * hidden_size * 4) / (
-        8 * 1024**3
-    )
+    # KV cache per token = 2 (K and V) * layers * (kv_heads * head_dim) * dtype
+    # bytes. The KV cache defaults to fp16 (2 bytes) in vLLM. This is GQA-aware
+    # via num_key_value_heads.
+    kv_cache_dtype_bytes = 2
+    kv_cache_per_token_gb = (
+        2 * num_layers * num_kv_heads * head_dim * kv_cache_dtype_bytes
+    ) / (1024**3)
 
-    activation_buffer_gb = max(0.3, hidden_size * num_layers / (1024**3) * 2)
+    # Runtime activation/workspace scales with model size; use a small
+    # fraction of the weights footprint with a sensible floor.
+    activation_buffer_gb = max(0.3, weights_memory_gb * 0.1)
 
     quantized = is_model_quantized(config, model_id)
     if total_vram < 8:
