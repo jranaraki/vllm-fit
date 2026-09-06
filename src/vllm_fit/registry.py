@@ -2,14 +2,30 @@ import json
 from typing import Dict, Any, Tuple, Optional
 
 from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import EntryNotFoundError
+from huggingface_hub.errors import (
+    EntryNotFoundError,
+    GatedRepoError,
+    HFValidationError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 
+# is_gguf_model lives in the dependency-free estimator module; re-exported here
+# for backwards compatibility (and used by the config lookup below).
+from .estimator import is_gguf_model
 
-def is_gguf_model(model_id: str) -> bool:
-    """Check if model is a GGUF model by looking for GGUF suffix or quantization patterns."""
-    repo_id = model_id.split(":")[0].upper()
-    model_upper = model_id.upper()
-    return "-GGUF" in repo_id or "_GGUF" in repo_id or ":Q" in model_upper
+# Errors that mean "this candidate repo/file genuinely isn't there" — we swallow
+# them so the lookup can fall through to the next candidate and, ultimately, to
+# the informative ValueError below. Transient transport failures (generic
+# HfHubHTTPError such as 5xx/429, connection/timeout errors) are deliberately
+# NOT included, so they propagate instead of being misreported as "not found".
+_LOOKUP_ERRORS = (
+    EntryNotFoundError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+    GatedRepoError,
+    HFValidationError,
+)
 
 
 def extract_repo_id(model_id: str) -> str:
@@ -49,7 +65,7 @@ def try_find_non_gguf_base(repo_id: str) -> Optional[str]:
                     force_download=False,
                 )
                 return candidate
-            except EntryNotFoundError:
+            except _LOOKUP_ERRORS:
                 continue
 
     return None
@@ -64,7 +80,7 @@ def gguf_repo_has_config(repo_id: str) -> bool:
             force_download=False,
         )
         return True
-    except EntryNotFoundError:
+    except _LOOKUP_ERRORS:
         return False
 
 
@@ -89,7 +105,7 @@ def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
 
                     if not has_config and candidate != repo_id:
                         return config, candidate
-            except EntryNotFoundError:
+            except _LOOKUP_ERRORS:
                 continue
 
     for candidate in try_extract_base_model(repo_id):
@@ -102,7 +118,7 @@ def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
             with open(config_path, "r") as f:
                 config = json.load(f)
                 return config, candidate
-        except EntryNotFoundError:
+        except _LOOKUP_ERRORS:
             continue
 
     raise ValueError(
