@@ -1,5 +1,5 @@
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict
 
 
 try:
@@ -54,57 +54,9 @@ def get_ram_info() -> float:
     return psutil.virtual_memory().total / (1024**3)
 
 
-def check_hardware_availability() -> Tuple[bool, Optional[str], Optional[str]]:
-    vram_info = get_vram_info()
-
-    if vram_info:
-        return True, "gpu", None
-
-    return True, "cpu", None
-
-
-def check_gpu_availability() -> Tuple[bool, Optional[str]]:
-    vram_info = get_vram_info()
-
-    if not vram_info:
-        return False, (
-            "No GPUs detected on this system. "
-            "vllm-fit requires NVIDIA GPU with CUDA support to run."
-        )
-
-    return True, None
-
-
-def get_available_vram(gpu_id: int = 0) -> float:
-    if pynvml is None:
-        import torch
-
-        if not torch.cuda.is_available():
-            raise RuntimeError("No CUDA device available")
-
-        if gpu_id >= torch.cuda.device_count():
-            raise RuntimeError(
-                f"GPU {gpu_id} not available (only {torch.cuda.device_count()} GPU(s) found)"
-            )
-
-        props = torch.cuda.get_device_properties(gpu_id)
-        return props.total_memory / 1024**3
-
-    try:
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
-        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        available = mem_info.free / 1024**3
-        pynvml.nvmlShutdown()
-        return available
-    except ImportError:
-        import torch
-
-        if not torch.cuda.is_available():
-            raise RuntimeError("No CUDA device available")
-
-        if gpu_id >= torch.cuda.device_count():
-            raise RuntimeError(f"GPU {gpu_id} not available")
-
-        props = torch.cuda.get_device_properties(gpu_id)
-        return props.total_memory / 1024**3
+def detect_hardware() -> str:
+    """Return the hardware type to target: "gpu" if any GPU is detected,
+    otherwise "cpu" (vLLM supports a CPU backend)."""
+    if get_vram_info():
+        return "gpu"
+    return "cpu"
