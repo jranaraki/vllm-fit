@@ -2,6 +2,26 @@
 
 <!-- version list -->
 
+## v0.3.1 (2026-09-08)
+
+### Bug Fixes
+
+- **cli**: Repair serve command and honor --gpuid in recommend
+  ([`16832ae`](https://github.com/jranaraki/vllm-fit/commit/16832ae261f667e39dfffe446b1059917e81fe97))
+
+- **estimator**: Correct memory math for KV cache, params and dtype
+  ([`ec3adcb`](https://github.com/jranaraki/vllm-fit/commit/ec3adcb92a00d18484c5c437d7b643e7b00e73a6))
+
+- **hardware**: Add honest detect_hardware and drop dead code
+  ([`7b7fee1`](https://github.com/jranaraki/vllm-fit/commit/7b7fee1feb94756d8b1879d78920e6e09788051c))
+
+- **profiler**: Count all tests, handle interrupts, restore output streams
+  ([`3bcf444`](https://github.com/jranaraki/vllm-fit/commit/3bcf444854c6dc7788775e26eeb7e33a1ca7e20c))
+
+- **registry**: Handle genuine HF lookup errors and dedupe is_gguf_model
+  ([`8cdd260`](https://github.com/jranaraki/vllm-fit/commit/8cdd2600acd79ca707e79c20a25fe631e1aecb50))
+
+
 ## v0.3.0 (2026-03-13)
 
 ### Features
