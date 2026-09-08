@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.3.2 (2026-09-08)
+
+### Bug Fixes
+
+- **estimator**: Count MoE experts and untied head, scale activation per-GPU
+  ([`44afa29`](https://github.com/jranaraki/vllm-fit/commit/44afa294ffdac1dd234c50c682b0e9b7a1683e12))
+
+- **profiler**: Terminate engine-test child on interrupt and always restore stdio
+  ([`5953346`](https://github.com/jranaraki/vllm-fit/commit/595334691f9ff973b1cac7bde6212c83ac061b33))
+
+### Refactoring
+
+- **cli**: Drop unused is_gguf_model import
+  ([`f58d775`](https://github.com/jranaraki/vllm-fit/commit/f58d775d5597404bbdcd08431acb35490eeaae6d))
+
+
 ## v0.3.1 (2026-09-08)
 
 ### Bug Fixes
