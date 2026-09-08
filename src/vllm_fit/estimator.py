@@ -107,11 +107,31 @@ def _estimate_param_count(config: Dict[str, Any]) -> int:
 
     hidden_act = str(config.get("hidden_act", "")).lower()
     mlp_matrices = 2 if hidden_act in _NON_GATED_ACTS else 3
-    mlp_params = num_layers * (mlp_matrices * n_embed * intermediate_size)
+    # Mixture-of-experts models replicate the MLP block across experts. Dense
+    # models report no expert count, so fall back to a single expert. MoE
+    # configs often size experts with their own (smaller) intermediate width.
+    num_experts = (
+        config.get("num_local_experts")
+        or config.get("num_experts")
+        or config.get("n_routed_experts")
+        or 1
+    )
+    expert_intermediate = (
+        config.get("moe_intermediate_size", intermediate_size)
+        if num_experts > 1
+        else intermediate_size
+    )
+    mlp_params = num_layers * num_experts * (
+        mlp_matrices * n_embed * expert_intermediate
+    )
 
     ln_params = num_layers * 5 * n_embed
 
     param_count = embedding_params + attn_params + mlp_params + ln_params
+    # An untied output head is a second vocab x hidden matrix; when weights are
+    # tied it reuses the embedding and adds nothing.
+    if config.get("tie_word_embeddings") is False:
+        param_count += vocab_size * n_embed
     # Small buffer for unmodelled parameters; calibrated so Llama-2-7B
     # lands near its true ~6.7B parameters.
     return int(param_count * 1.1)
@@ -247,8 +267,11 @@ def estimate_parameters(
         )
 
     per_gpu_weights = weights_memory_gb / tensor_parallel_size
+    # Activation memory lives on each GPU and scales with the shard it holds,
+    # not the whole model, so derive it from the per-GPU weight footprint.
+    per_gpu_activation_gb = max(0.3, per_gpu_weights * 0.1)
     available_for_kv = per_gpu_vram * gpu_memory_utilization - (
-        per_gpu_weights + activation_buffer_gb
+        per_gpu_weights + per_gpu_activation_gb
     )
 
     if kv_cache_per_token_gb > 0:
@@ -265,7 +288,7 @@ def estimate_parameters(
 
     per_gpu_min_memory = (
         per_gpu_weights
-        + activation_buffer_gb
+        + per_gpu_activation_gb
         + compile_workspace_gb
         + (min_reserved_gb / num_gpus)
     )
@@ -328,7 +351,7 @@ def estimate_parameters(
         "max_num_seqs": max_num_seqs,
         "estimated_weights_memory_gb": round(weights_memory_gb, 2),
         "per_gpu_weights_gb": round(per_gpu_weights, 2),
-        "activation_memory_gb": round(activation_buffer_gb, 2),
+        "activation_memory_gb": round(per_gpu_activation_gb, 2),
         "compile_workspace_gb": round(compile_workspace_gb, 2),
         "min_required_memory_gb": round(per_gpu_min_memory * tensor_parallel_size, 2),
         "can_fit": can_fit,
