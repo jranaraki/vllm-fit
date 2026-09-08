@@ -9,10 +9,28 @@ from rich.panel import Panel
 from .engine_tester import profile_parameters, profile_parameters_cpu
 from .estimator import estimate_parameters, estimate_parameters_cpu
 from .hardware import get_vram_info, detect_hardware, get_ram_info
+from .params import resolve_weights
 from .registry import get_model_config
 
 app = typer.Typer()
 console = Console()
+
+
+def _resolve_weight_info(config_repo_id: str, config: dict):
+    """Best-effort exact weight metadata; None on any failure (offline, old hub)."""
+    try:
+        return resolve_weights(config_repo_id, config)
+    except Exception:
+        return None
+
+
+def _print_warnings(params: dict) -> None:
+    """Surface estimator warnings (fail-loud missing field, offline analytic, vLLM divergence)."""
+    warnings = params.get("warnings") or []
+    for warning in warnings:
+        print(f"[yellow]⚠️  {warning}[/yellow]")
+    if warnings:
+        print()
 
 
 def parse_gpu_ids(gpuid: str, vram_info: dict) -> list[int]:
@@ -88,12 +106,16 @@ def recommend(
 
     config, config_repo_id = get_model_config(model_id)
 
+    weight_info = _resolve_weight_info(config_repo_id, config)
+
     if hardware_type == "cpu":
         total_ram = get_ram_info()
-        params = estimate_parameters_cpu(config, total_ram, model_id)
+        params = estimate_parameters_cpu(config, total_ram, model_id, weight_info=weight_info)
         print(f"CPU RAM: {total_ram:.1f} GB")
         print()
         print("[dim]Using CPU mode (no GPU detected)[/dim]")
+        print()
+        _print_warnings(params)
     else:
         vram_info = get_vram_info()
         gpuids = parse_gpu_ids(gpuid, vram_info)
@@ -104,13 +126,16 @@ def recommend(
 
         total_vram = sum(vram_info[gid] for gid in gpuids)
         num_gpus = len(gpuids)
-        params = estimate_parameters(config, total_vram, num_gpus, model_id)
+        params = estimate_parameters(
+            config, total_vram, num_gpus, model_id, weight_info=weight_info
+        )
 
         gpu_info = f"{total_vram:.1f} GB"
         if num_gpus > 1:
             gpu_info += f" ({num_gpus}x ~{total_vram / num_gpus:.1f} GB each)"
         print(f"GPU VRAM: {gpu_info}")
         print()
+        _print_warnings(params)
 
     if not params["can_fit"]:
         if hardware_type == "cpu":
@@ -174,7 +199,11 @@ def profile(
 
         start_time = time.time()
 
-        initial_params = estimate_parameters_cpu(config, total_ram, model_id)
+        weight_info = _resolve_weight_info(config_repo_id, config)
+        initial_params = estimate_parameters_cpu(
+            config, total_ram, model_id, weight_info=weight_info
+        )
+        _print_warnings(initial_params)
         params = profile_parameters_cpu(
             model_id,
             initial_params,
@@ -236,8 +265,9 @@ def profile(
         num_gpus = len(gpuids)
         total_vram = sum(vram_info[gid] for gid in gpuids)
         small_gpu = total_vram / num_gpus < 8
+        weight_info = _resolve_weight_info(config_repo_id, config)
         initial_params = estimate_parameters(
-            config, total_vram, num_gpus=num_gpus, model_id=model_id
+            config, total_vram, num_gpus=num_gpus, model_id=model_id, weight_info=weight_info
         )
         initial_params["gpu_ids"] = gpuids
 
@@ -246,6 +276,7 @@ def profile(
         )
         print("[yellow]🔍 Starting dynamic profiling...[/yellow]")
         print()
+        _print_warnings(initial_params)
 
         start_time = time.time()
 
@@ -319,13 +350,18 @@ def serve(
 
     env = os.environ.copy()
 
+    weight_info = _resolve_weight_info(config_repo_id, config)
+
     if hardware_type == "cpu":
         total_ram = get_ram_info()
         print(f"[yellow]Using CPU mode ({total_ram:.1f} GB RAM)[/yellow]")
         print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
         print()
 
-        initial_params = estimate_parameters_cpu(config, total_ram, model_id)
+        initial_params = estimate_parameters_cpu(
+            config, total_ram, model_id, weight_info=weight_info
+        )
+        _print_warnings(initial_params)
         params = profile_parameters_cpu(
             model_id,
             initial_params,
@@ -343,7 +379,7 @@ def serve(
         num_gpus = len(gpuids)
         total_vram = sum(vram_info[gid] for gid in gpuids)
         initial_params = estimate_parameters(
-            config, total_vram, num_gpus=num_gpus, model_id=model_id
+            config, total_vram, num_gpus=num_gpus, model_id=model_id, weight_info=weight_info
         )
         initial_params["gpu_ids"] = gpuids
 
@@ -352,6 +388,7 @@ def serve(
         )
         print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
         print()
+        _print_warnings(initial_params)
 
         params = profile_parameters(
             model_id,
