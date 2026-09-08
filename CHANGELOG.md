@@ -2,6 +2,38 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-09-08)
+
+### Bug Fixes
+
+- **estimator**: VLLM-accurate memory model and quant-aware sizing (Layers 3-4)
+  ([`b1ed902`](https://github.com/jranaraki/vllm-fit/commit/b1ed90215fe6f3018f3a4d4bcbbeb8a85c9b57a1))
+
+- **registry**: Clean offline cache-miss error, dedupe candidates
+  ([`69741d1`](https://github.com/jranaraki/vllm-fit/commit/69741d1a4e2cb5f9a0d23b7189b4fc22100e1bda))
+
+### Documentation
+
+- Note architecture-aware estimation, CPU mode, and fix arg ordering
+  ([`a25385d`](https://github.com/jranaraki/vllm-fit/commit/a25385d7c0d4c11ecc1507fedcf89c2d7ac7f285))
+
+### Features
+
+- **cli**: Wire exact param resolution and surface warnings
+  ([`d2d6275`](https://github.com/jranaraki/vllm-fit/commit/d2d62753565055e0d75375a98cb38d3d7f90c1a7))
+
+- **params**: Exact model-size ladder from HF metadata (Layer 2)
+  ([`2f9c544`](https://github.com/jranaraki/vllm-fit/commit/2f9c544e0b0744904f6bc4f6c3ae33672490c682))
+
+- **resolver**: Structure-aware config resolution (Layer 1)
+  ([`2b05d1e`](https://github.com/jranaraki/vllm-fit/commit/2b05d1ea2011aa64fbf011871dd14b5e73908183))
+
+### Testing
+
+- Cover resolver, param ladder, and new estimator behavior
+  ([`9602c31`](https://github.com/jranaraki/vllm-fit/commit/9602c31b0e7861c404cf6a10864dd8a9793048fd))
+
+
 ## v0.3.2 (2026-09-08)
 
 ### Bug Fixes
