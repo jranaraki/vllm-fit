@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .engine_tester import profile_parameters, profile_parameters_cpu
-from .estimator import estimate_parameters, estimate_parameters_cpu, is_gguf_model
+from .estimator import estimate_parameters, estimate_parameters_cpu
 from .hardware import get_vram_info, detect_hardware, get_ram_info
 from .registry import get_model_config
 
