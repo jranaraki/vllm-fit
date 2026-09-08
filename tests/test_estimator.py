@@ -1,4 +1,9 @@
-from vllm_fit.estimator import estimate_parameters, _estimate_param_count
+from vllm_fit.estimator import (
+    estimate_parameters,
+    _estimate_param_count,
+    get_bytes_per_param,
+)
+from vllm_fit.params import WeightInfo
 from vllm_fit.registry import extract_repo_id, try_extract_base_model, is_gguf_model
 
 
@@ -113,6 +118,137 @@ def test_try_extract_base_model():
 
     candidates = try_extract_base_model("Qwen/Qwen2.5-1.5B")
     assert "Qwen/Qwen2.5-1.5B" in candidates
+
+
+def _qwen35_text_dims():
+    return {
+        "hidden_size": 5120,
+        "num_hidden_layers": 64,
+        "num_attention_heads": 40,
+        "num_key_value_heads": 8,
+        "intermediate_size": 27648,
+        "vocab_size": 152064,
+        "max_position_embeddings": 32768,
+        "hidden_act": "silu",
+        "tie_word_embeddings": False,
+    }
+
+
+def test_nested_config_reads_text_config_not_defaults():
+    # The reported bug: a nested/multimodal config was sized against hard-coded
+    # defaults (~17 GB) instead of the real dims under text_config (~65 GB).
+    nested = {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "vision_config": {"hidden_size": 1152, "num_hidden_layers": 27},
+        "text_config": _qwen35_text_dims(),
+    }
+    flat = _qwen35_text_dims()
+
+    nested_res = estimate_parameters(nested, total_vram=24.0)
+    flat_res = estimate_parameters(flat, total_vram=24.0)
+
+    # Resolution works: nested is sized identically to the flattened dims.
+    assert nested_res["estimated_weights_memory_gb"] == flat_res["estimated_weights_memory_gb"]
+    # And it is the real ~65 GB model, not the ~17 GB defaults result.
+    assert nested_res["estimated_weights_memory_gb"] > 40
+    # A ~65 GB model cannot fit on a single 24 GB GPU.
+    assert nested_res["can_fit"] is False
+
+
+def test_missing_field_emits_warning():
+    # A config genuinely lacking core dims must warn (fail loud), not silently default.
+    res = estimate_parameters({"vocab_size": 32000}, total_vram=24.0)
+    assert any("hidden_size" in w or "num_hidden_layers" in w for w in res["warnings"])
+
+
+def test_weight_info_overrides_analytic():
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+           "vocab_size": 32000}
+    wi = WeightInfo(source="safetensors_metadata", total_params=1_000_000_000,
+                    weights_bytes=int(1.5 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=24.0, weight_info=wi)
+    assert res["estimated_weights_memory_gb"] == 1.5
+    # Exact metadata means no "analytic estimate" warning.
+    assert not any("analytic" in w for w in res["warnings"])
+
+
+def test_tp_respects_head_divisibility():
+    cfg = {"hidden_size": 8192, "num_hidden_layers": 80, "num_attention_heads": 32,
+           "vocab_size": 128000, "intermediate_size": 28672}
+    res = estimate_parameters(cfg, total_vram=48.0, num_gpus=6)
+    tp = res["tensor_parallel_size"]
+    assert 32 % tp == 0
+    assert tp in (1, 2, 4)  # never 3, 5, or 6
+
+
+def test_mla_gives_more_context_than_dense():
+    # MLA stores a tiny latent per token, so the same-size model should support a
+    # much longer max_model_len than a naive MHA KV cache.
+    base = {"hidden_size": 5120, "num_hidden_layers": 60, "num_attention_heads": 128,
+            "num_key_value_heads": 128, "vocab_size": 129280, "intermediate_size": 12288,
+            "max_position_embeddings": 163840}
+    mla = {**base, "kv_lora_rank": 512, "qk_rope_head_dim": 64}
+    wi = WeightInfo(source="test", weights_bytes=int(20 * 1024**3))
+    base_res = estimate_parameters(base, total_vram=80.0, weight_info=wi)
+    mla_res = estimate_parameters(mla, total_vram=80.0, weight_info=wi)
+    assert mla_res["max_model_len"] > base_res["max_model_len"]
+
+
+def test_hybrid_layers_give_more_context():
+    # Only counting full-attention layers frees KV budget vs charging every layer.
+    dims = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+            "num_key_value_heads": 8, "vocab_size": 32000, "intermediate_size": 14336,
+            "max_position_embeddings": 131072}
+    dense = dict(dims)
+    hybrid = {**dims, "full_attention_interval": 4}
+    wi = WeightInfo(source="test", weights_bytes=int(8 * 1024**3))
+    dense_res = estimate_parameters(dense, total_vram=24.0, weight_info=wi)
+    hybrid_res = estimate_parameters(hybrid, total_vram=24.0, weight_info=wi)
+    assert hybrid_res["max_model_len"] > dense_res["max_model_len"]
+
+
+def test_max_model_len_capped_at_model_context():
+    # Even with abundant VRAM, max_model_len must not exceed the model's real context.
+    cfg = {"hidden_size": 2048, "num_hidden_layers": 24, "num_attention_heads": 16,
+           "num_key_value_heads": 2, "vocab_size": 32000, "intermediate_size": 5632,
+           "max_position_embeddings": 4096}
+    wi = WeightInfo(source="test", weights_bytes=int(2 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=80.0, weight_info=wi)
+    assert res["max_model_len"] <= 4096
+
+
+def test_bytes_per_param_compressed_tensors():
+    cfg = {
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "config_groups": {
+                "group_0": {"weights": {"num_bits": 4}, "input_activations": {"num_bits": 8}}
+            },
+        }
+    }
+    assert get_bytes_per_param(cfg) == 0.5
+
+
+def test_bytes_per_param_compressed_tensors_2of4_sparsity():
+    cfg = {
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "config_groups": {"group_0": {"weights": {"num_bits": 8}}},
+            "sparsity_config": {"sparsity_structure": "2:4"},
+        }
+    }
+    assert get_bytes_per_param(cfg) == 0.5  # 8 bits -> 1.0 byte, halved by 2:4
+
+
+def test_bytes_per_param_gguf_effective_bpw():
+    assert abs(get_bytes_per_param({}, "org/model-GGUF:Q4_K_M") - 4.89 / 8) < 1e-9
+    assert abs(get_bytes_per_param({}, "org/model-GGUF:Q8_0") - 8.5 / 8) < 1e-9
+
+
+def test_bytes_per_param_fp8_dtype():
+    assert get_bytes_per_param({"dtype": "float8_e4m3fn"}) == 1.0
+    assert get_bytes_per_param({"dtype": "bfloat16"}) == 2.0
+    assert get_bytes_per_param({"torch_dtype": "float32"}) == 4.0
 
 
 def test_is_gguf_model():
