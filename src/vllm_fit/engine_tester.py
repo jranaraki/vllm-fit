@@ -54,14 +54,16 @@ def _test_configuration_cpu(
     sys.stdout = io.StringIO()
     sys.stderr = io.StringIO()
 
-    p.start()
-    p.join(timeout=timeout)
-
-    sys.stdout = old_stdout
-    sys.stderr = old_stderr
+    try:
+        p.start()
+        p.join(timeout=timeout)
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
     if p.is_alive():
         p.terminate()
+        p.join()
         return False, True
 
     if p.exitcode == 0:
@@ -144,6 +146,7 @@ def _test_configuration(
 
     if p.is_alive():
         p.terminate()
+        p.join()
         return False, True  # Failed, timeout
 
     if p.exitcode == 0:
@@ -156,6 +159,7 @@ def _binary_search_max_num_seqs(
     model_id: str,
     fixed_params: dict,
     progress_callback: Optional[Callable[[str], None]] = None,
+    on_test: Optional[Callable[[], None]] = None,
 ) -> int:
     gpu_ids = fixed_params["gpu_ids"]
     gpu_memory_utilization = fixed_params["gpu_memory_utilization"]
@@ -175,6 +179,8 @@ def _binary_search_max_num_seqs(
                 f"  Binary search Seqs: testing {mid} (range {low}-{high})"
             )
 
+        if on_test:
+            on_test()
         success, timeout = _test_configuration(
             model_id,
             gpu_memory_utilization,
@@ -198,6 +204,7 @@ def _binary_search_max_model_len(
     model_id: str,
     fixed_params: dict,
     progress_callback: Optional[Callable[[str], None]] = None,
+    on_test: Optional[Callable[[], None]] = None,
 ) -> int:
     gpu_ids = fixed_params["gpu_ids"]
     gpu_memory_utilization = fixed_params["gpu_memory_utilization"]
@@ -217,6 +224,8 @@ def _binary_search_max_model_len(
                 f"  Binary search Len: testing {mid} (range {low}-{high})"
             )
 
+        if on_test:
+            on_test()
         success, timeout = _test_configuration(
             model_id,
             gpu_memory_utilization,
@@ -249,13 +258,15 @@ def profile_parameters(
     enforce_eager = False
     total_attempts = 0
 
-    old_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-
     def _log_attempt(msg: str):
         nonlocal total_attempts
         total_attempts += 1
         if progress_callback:
             progress_callback(f"Attempt {total_attempts} • {msg}")
+
+    def _count_test():
+        nonlocal total_attempts
+        total_attempts += 1
 
     try:
         _log_attempt(
@@ -367,12 +378,12 @@ def profile_parameters(
         }
 
         max_num_seqs = _binary_search_max_num_seqs(
-            model_id, fixed_params, progress_callback
+            model_id, fixed_params, progress_callback, _count_test
         )
         fixed_params["max_num_seqs"] = max_num_seqs
 
         max_model_len = _binary_search_max_model_len(
-            model_id, fixed_params, progress_callback
+            model_id, fixed_params, progress_callback, _count_test
         )
         fixed_params["max_model_len"] = max_model_len
 
@@ -389,11 +400,18 @@ def profile_parameters(
             "attempts_made": total_attempts,
         }
 
-    finally:
-        if old_cuda_visible:
-            os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_visible
-        else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    except KeyboardInterrupt:
+        if progress_callback:
+            progress_callback("[yellow]Profiling interrupted by user[/yellow]")
+        return {
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": tensor_parallel_size,
+            "max_num_seqs": max_num_seqs,
+            "enforce_eager": enforce_eager,
+            "profiling_success": False,
+            "attempts_made": total_attempts,
+        }
 
 
 def profile_parameters_cpu(
