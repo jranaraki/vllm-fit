@@ -57,6 +57,12 @@ def _test_configuration_cpu(
     try:
         p.start()
         p.join(timeout=timeout)
+    except BaseException:
+        # On Ctrl-C (or any error) don't leave the child process behind.
+        if p.is_alive():
+            p.terminate()
+            p.join()
+        raise
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
@@ -138,11 +144,18 @@ def _test_configuration(
     sys.stdout = io.StringIO()
     sys.stderr = io.StringIO()
 
-    p.start()
-    p.join(timeout=timeout)
-
-    sys.stdout = old_stdout
-    sys.stderr = old_stderr
+    try:
+        p.start()
+        p.join(timeout=timeout)
+    except BaseException:
+        # On Ctrl-C (or any error) don't leave the child holding GPU memory.
+        if p.is_alive():
+            p.terminate()
+            p.join()
+        raise
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
     if p.is_alive():
         p.terminate()
