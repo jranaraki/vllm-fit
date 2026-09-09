@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-09-09)
+
+### Features
+
+- **cpu,macos**: Apple Silicon detection, VLLM_CPU_KVCACHE_SPACE, RAM-aware CPU sizing
+  ([`ec5855c`](https://github.com/jranaraki/vllm-fit/commit/ec5855cfd97bdccf8f9a5f7fac375a0514718e50))
+
+
 ## v0.4.2 (2026-09-09)
 
 ### Bug Fixes
