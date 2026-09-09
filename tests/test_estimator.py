@@ -217,6 +217,33 @@ def test_max_model_len_capped_at_model_context():
     assert res["max_model_len"] <= 4096
 
 
+def test_enforce_eager_lever_flips_borderline_fit():
+    # A model that overflows by less than the CUDA-graph reserve should be made to
+    # fit by the enforce-eager lever, and the reported field must say so (no silent
+    # inconsistency between can_fit, enforce_eager, and the emitted command).
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+           "num_key_value_heads": 8, "vocab_size": 32000, "intermediate_size": 14336,
+           "max_position_embeddings": 32768}
+    wi = WeightInfo(source="test", weights_bytes=int(12.8 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=16.0, num_gpus=1, weight_info=wi)
+    assert res["can_fit"] is True
+    assert res["enforce_eager"] is True
+    # With the lever engaged, the CUDA-graph workspace is zeroed.
+    assert res["compile_workspace_gb"] == 0.0
+
+
+def test_enforce_eager_field_honest_when_it_cannot_help():
+    # 27B bf16 on 4x15GB: even zeroing the CUDA-graph reserve leaves no KV room, so
+    # the estimator must NOT claim enforce_eager fixed it.
+    cfg = {"hidden_size": 5120, "num_hidden_layers": 64, "num_attention_heads": 40,
+           "num_key_value_heads": 8, "vocab_size": 152064, "intermediate_size": 27648,
+           "max_position_embeddings": 40960}
+    wi = WeightInfo(source="test", weights_bytes=int(51.75 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=60.0, num_gpus=4, weight_info=wi)
+    assert res["can_fit"] is False
+    assert res["enforce_eager"] is False
+
+
 def test_bytes_per_param_compressed_tensors():
     cfg = {
         "quantization_config": {

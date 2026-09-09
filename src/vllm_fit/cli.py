@@ -173,7 +173,7 @@ def recommend(
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
     print(
-        f"[dim]{_format_vllm_command(model_id, params, not params['can_fit'] or params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
+        f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
     )
 
 
