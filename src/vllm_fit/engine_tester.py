@@ -10,8 +10,12 @@ def _test_engine_worker_cpu(
     max_model_len: int,
     max_num_seqs: int,
     enforce_eager: bool = False,
+    kv_cache_space_gb: Optional[int] = None,
 ) -> int:
     os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+    # Size the CPU KV cache to match what we recommend, so the probe is representative.
+    if kv_cache_space_gb and kv_cache_space_gb > 0:
+        os.environ["VLLM_CPU_KVCACHE_SPACE"] = str(kv_cache_space_gb)
 
     devnull = open(os.devnull, "w")
     os.dup2(devnull.fileno(), 1)
@@ -37,6 +41,7 @@ def _test_configuration_cpu(
     max_num_seqs: int,
     enforce_eager: bool,
     timeout: int = 600,
+    kv_cache_space_gb: Optional[int] = None,
 ) -> Tuple[bool, bool]:
     ctx = multiprocessing.get_context("spawn")
     p = ctx.Process(
@@ -46,6 +51,7 @@ def _test_configuration_cpu(
             max_model_len,
             max_num_seqs,
             enforce_eager,
+            kv_cache_space_gb,
         ),
     )
 
@@ -435,6 +441,7 @@ def profile_parameters_cpu(
     max_model_len = initial_params["max_model_len"]
     max_num_seqs = initial_params["max_num_seqs"]
     enforce_eager = initial_params["enforce_eager"]
+    kv_cache_space_gb = initial_params.get("kv_cache_space_gb")
     total_attempts = 0
 
     def _log_attempt(msg: str):
@@ -453,6 +460,7 @@ def profile_parameters_cpu(
             max_model_len,
             max_num_seqs,
             enforce_eager,
+            kv_cache_space_gb=kv_cache_space_gb,
         )
 
         if not success and not enforce_eager:
@@ -469,6 +477,7 @@ def profile_parameters_cpu(
                 max_model_len,
                 max_num_seqs,
                 enforce_eager,
+                kv_cache_space_gb=kv_cache_space_gb,
             )
 
         if not success:
@@ -499,6 +508,7 @@ def profile_parameters_cpu(
                     max_model_len,
                     max_num_seqs,
                     enforce_eager,
+                    kv_cache_space_gb=kv_cache_space_gb,
                 )
 
         if not success:
@@ -510,6 +520,7 @@ def profile_parameters_cpu(
                 "tensor_parallel_size": 1,
                 "max_num_seqs": max_num_seqs,
                 "enforce_eager": enforce_eager,
+                "kv_cache_space_gb": kv_cache_space_gb,
                 "profiling_success": False,
                 "attempts_made": total_attempts,
             }
@@ -537,6 +548,7 @@ def profile_parameters_cpu(
                 mid,
                 max_num_seqs,
                 enforce_eager,
+                kv_cache_space_gb=kv_cache_space_gb,
             )
 
             if success and not timeout:
@@ -556,6 +568,7 @@ def profile_parameters_cpu(
             "tensor_parallel_size": 1,
             "max_num_seqs": max_num_seqs,
             "enforce_eager": enforce_eager,
+            "kv_cache_space_gb": kv_cache_space_gb,
             "profiling_success": True,
             "attempts_made": total_attempts,
         }
@@ -569,6 +582,7 @@ def profile_parameters_cpu(
             "tensor_parallel_size": 1,
             "max_num_seqs": max_num_seqs,
             "enforce_eager": enforce_eager,
+            "kv_cache_space_gb": kv_cache_space_gb,
             "profiling_success": False,
             "attempts_made": total_attempts,
         }

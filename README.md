@@ -11,7 +11,7 @@ A CLI tool designed to simply _recommend_ (conservative), and/or _profile_ (to m
 - **Static Estimation**: Instant, architecture-aware parameter recommendations from model config (accounts for GQA, mixture-of-experts, and quantized weights)
 - **Dynamic Profiling**: Tests real memory usage to find actual limits
 - **Multi-GPU Support**: Automatic tensor parallel configuration
-- **CPU Fallback**: Automatically switches to a RAM-based CPU mode when no GPU is detected
+- **CPU & Apple Silicon Fallback**: Auto-detects when no NVIDIA GPU is present, sizes limits conservatively from available (unified) RAM, and emits a complete CPU serve command
 - **Smart Fail Handling**: Graceful errors when VRAM insufficient
 - **Optimized Output**: Clean logs without vLLM noise
 
@@ -63,13 +63,26 @@ Use `--gpuid` to control which GPUs are used:
 - `--gpuid 0,1,2` - Use GPUs 0, 1, and 2
 - `--gpuid all` (default) - Use all available GPUs
 
-### CPU Mode
+### CPU & Apple Silicon Mode
 
 All three commands auto-detect your hardware. When no NVIDIA GPU is found,
-vllm-fit runs in CPU mode automatically: recommendations and profiling are based
-on available system RAM, and the generated `vllm serve` command omits the
-GPU-only flags (`--gpu_memory_utilization`, `--tensor_parallel_size`). No flag is
-needed to enable it — `--gpuid` is simply ignored on CPU-only machines.
+vllm-fit runs in CPU mode automatically (no flag needed; `--gpuid` is ignored):
+
+- **Conservative, RAM-aware sizing** — `max_model_len` and `max_num_seqs` are
+  derived from available system RAM and deliberately leave headroom, so the machine
+  stays responsive while vLLM serves rather than consuming all free memory.
+- **Complete CPU command** — the emitted command drops the GPU-only flags
+  (`--gpu_memory_utilization`, `--tensor_parallel_size`) and is prefixed with the
+  `VLLM_CPU_KVCACHE_SPACE=<GB>` the CPU backend needs to size its KV cache:
+
+  ```
+  VLLM_CPU_KVCACHE_SPACE=10 vllm serve <model_id> --max_model_len 8192 --max_num_seqs 8 --max_num_batched_tokens 2048 --enforce-eager
+  ```
+
+- **Apple Silicon** — Macs are detected and reported against their unified-memory
+  pool. Note that native vLLM on macOS is a source build, CPU-only (no Apple-GPU
+  acceleration), and experimental; for Metal GPU inference, see the community
+  [`vllm-metal`](https://github.com/vllm-project/vllm-metal) (MLX) plugin.
 
 ## Output
 
@@ -126,7 +139,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --gpu_memory_utilization 0.80 --tensor_paral
 - **vLLM** - Install separately (GPU or CPU version, see vLLM installation docs)
 - **Hardware**:
   - GPU: NVIDIA GPU with CUDA support, 4GB+ VRAM recommended
-  - CPU: 16GB+ RAM recommended (varies by model size)
+  - CPU / Apple Silicon: 16GB+ (unified) RAM recommended (varies by model size)
 - Python 3.9+
 
 ## Troubleshooting
@@ -143,6 +156,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --gpu_memory_utilization 0.80 --tensor_paral
 1. Ensure vLLM CPU version is installed (not GPU version)
 2. Check available RAM: `python -c "import psutil; print(psutil.virtual_memory().total / 1024**3)"` (need 16GB+ recommended)
 3. Try a smaller model or quantized GGUF format
+4. On macOS, vLLM has no prebuilt wheel — build it from source (CPU-only), or use the `vllm-metal` plugin for Apple-GPU inference
 
 ### Model won't fit?
 

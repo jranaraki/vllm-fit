@@ -8,7 +8,7 @@ from rich.panel import Panel
 
 from .engine_tester import profile_parameters, profile_parameters_cpu
 from .estimator import estimate_parameters, estimate_parameters_cpu
-from .hardware import get_vram_info, detect_hardware, get_ram_info
+from .hardware import get_vram_info, detect_hardware, get_ram_info, is_apple_silicon
 from .params import resolve_weights
 from .registry import get_model_config
 
@@ -33,6 +33,24 @@ def _resolve_weight_info(config_repo_id: str, config: dict):
         return resolve_weights(config_repo_id, config)
     except Exception:
         return None
+
+
+def _print_mac_guidance() -> None:
+    """On Apple Silicon, explain the vLLM-on-macOS reality (informational only)."""
+    if not is_apple_silicon():
+        return
+    print("[cyan]🍎 Apple Silicon detected — vLLM runs on the CPU backend here.[/cyan]")
+    print(
+        "[dim]  • Native vLLM on macOS is a source build (no prebuilt wheels), CPU-only "
+        "(no Apple-GPU acceleration), FP32/FP16, and experimental.\n"
+        "  • For Metal GPU inference, see the community 'vllm-metal' (MLX) plugin instead.\n"
+        "  • Memory below is the shared unified-memory pool.[/dim]"
+    )
+    print()
+
+
+def _ram_label() -> str:
+    return "Unified memory" if is_apple_silicon() else "CPU RAM"
 
 
 def _print_warnings(params: dict) -> None:
@@ -102,11 +120,15 @@ def _format_vllm_command(
     config_repo_id: Optional[str] = None,
     hardware_type: str = "gpu",
 ) -> str:
-    return " ".join(
-        _build_vllm_args(
-            model_id, params, enforce_eager, config_repo_id, hardware_type
-        )
+    args = _build_vllm_args(
+        model_id, params, enforce_eager, config_repo_id, hardware_type
     )
+    # The CPU KV cache is sized via an env var, not a CLI flag: show it as an inline
+    # assignment prefix so the copy-pasteable command matches what `serve` actually runs.
+    kv_space = params.get("kv_cache_space_gb")
+    if hardware_type == "cpu" and kv_space:
+        return f"VLLM_CPU_KVCACHE_SPACE={kv_space} " + " ".join(args)
+    return " ".join(args)
 
 
 @app.command()
@@ -125,7 +147,8 @@ def recommend(
     if hardware_type == "cpu":
         total_ram = get_ram_info()
         params = estimate_parameters_cpu(config, total_ram, model_id, weight_info=weight_info)
-        print(f"CPU RAM: {total_ram:.1f} GB")
+        _print_mac_guidance()
+        print(f"{_ram_label()}: {total_ram:.1f} GB")
         print()
         print("[dim]Using CPU mode (no GPU detected)[/dim]")
         print()
@@ -184,6 +207,8 @@ def recommend(
     print(f"tensor_parallel_size: {params['tensor_parallel_size']}")
     print(f"max_num_seqs: {params['max_num_seqs']}")
     print(f"estimated_weights_memory_gb: {params['estimated_weights_memory_gb']}")
+    if hardware_type == "cpu" and params.get("kv_cache_space_gb"):
+        print(f"VLLM_CPU_KVCACHE_SPACE: {params['kv_cache_space_gb']} GB")
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
     print(
@@ -204,7 +229,8 @@ def profile(
 
     if hardware_type == "cpu":
         total_ram = get_ram_info()
-        print(f"[yellow]Using CPU mode ({total_ram:.1f} GB RAM)[/yellow]")
+        _print_mac_guidance()
+        print(f"[yellow]Using CPU mode ({total_ram:.1f} GB {_ram_label()})[/yellow]")
         print("[yellow]🔍 Starting simplified profiling...[/yellow]")
         print(
             "[dim]Note: CPU profiling is slower and uses conservative estimates[/dim]"
@@ -368,7 +394,8 @@ def serve(
 
     if hardware_type == "cpu":
         total_ram = get_ram_info()
-        print(f"[yellow]Using CPU mode ({total_ram:.1f} GB RAM)[/yellow]")
+        _print_mac_guidance()
+        print(f"[yellow]Using CPU mode ({total_ram:.1f} GB {_ram_label()})[/yellow]")
         print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
         print()
 
@@ -381,6 +408,9 @@ def serve(
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
         )
+        kv_space = params.get("kv_cache_space_gb")
+        if kv_space:
+            env["VLLM_CPU_KVCACHE_SPACE"] = str(kv_space)
     else:
         vram_info = get_vram_info()
         gpuids = parse_gpu_ids(gpuid, vram_info)
