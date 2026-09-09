@@ -329,6 +329,29 @@ def _select_tensor_parallel(
     return candidates[-1]
 
 
+def _kv_bytes_per_token(
+    config: Dict[str, Any],
+    num_layers: int,
+    num_kv_heads: int,
+    head_dim: int,
+    tensor_parallel_size: int = 1,
+    kv_dtype_bytes: int = 2,
+) -> float:
+    """KV-cache bytes per token, architecture-aware.
+
+    Counts only full-attention layers (hybrid models free the rest), divides KV heads
+    across tensor-parallel ranks (floor 1), and uses the compact MLA latent when present.
+    """
+    full_layers = full_attention_layer_count(config, num_layers)
+    mla = detect_mla(config)
+    if mla:
+        # MLA stores a small latent per token: no x2, no x heads. Replicated across
+        # TP ranks (not sharded), so it doesn't shrink with tensor parallel.
+        return full_layers * (mla["kv_lora_rank"] + mla["qk_rope_head_dim"]) * kv_dtype_bytes
+    kv_heads_per_gpu = max(1, num_kv_heads // tensor_parallel_size)
+    return 2 * full_layers * kv_heads_per_gpu * head_dim * kv_dtype_bytes
+
+
 def estimate_parameters_cpu(
     config: Dict[str, Any], total_ram: float, model_id: str = "", weight_info: Any = None
 ) -> Dict[str, Any]:
@@ -341,23 +364,50 @@ def estimate_parameters_cpu(
     # of the weights footprint with a sensible floor.
     activation_buffer_gb = max(0.5, weights_memory_gb * 0.1)
 
-    reserved_gb = max(2.0, total_ram * 0.15)
-
     tensor_parallel_size = 1
 
-    max_model_len = 512 if total_ram >= 16 else 256
+    # Deliberately hold back RAM so the machine stays responsive once vLLM is serving:
+    # reserve generous OS/framework headroom, then hand only HALF of what remains to the
+    # KV cache, hard-capped at 30% of total RAM. This is the "don't exhaust capacity" rule.
+    PRACTICAL_CPU_LEN_CAP = 8192  # CPU inference is slow; very long context isn't practical
+    MAX_NUM_SEQS_CAP = 8          # modest concurrency keeps latency and RAM in check
 
-    max_num_seqs = 4
+    os_headroom_gb = max(3.0, total_ram * 0.20)
+    spare_gb = total_ram - weights_memory_gb - activation_buffer_gb - os_headroom_gb
+    kv_cache_space_gb = int(round(max(0.0, min(spare_gb * 0.5, total_ram * 0.30))))
 
-    total_required_gb = weights_memory_gb + activation_buffer_gb + reserved_gb
+    # Architecture-aware KV bytes/token (tp=1 on CPU); floor of 1 byte guards odd configs.
+    hidden_size = int(get_field(tc, "hidden_size", 4096, warnings))
+    num_layers = int(get_field(tc, "num_hidden_layers", 32, warnings))
+    num_attention_heads = int(get_field(tc, "num_attention_heads", 32, warnings))
+    num_kv_heads = int(get_field(tc, "num_key_value_heads", num_attention_heads))
+    head_dim = get_head_dim(tc) or (
+        hidden_size // num_attention_heads if num_attention_heads else hidden_size
+    )
+    head_dim = int(head_dim)
+    kv_bytes_per_token = max(1.0, _kv_bytes_per_token(
+        config, num_layers, num_kv_heads, head_dim, tensor_parallel_size
+    ))
+    max_kv_tokens = int(kv_cache_space_gb * (1024**3) / kv_bytes_per_token)
+
+    derived_cap = derive_max_model_len(config) or PRACTICAL_CPU_LEN_CAP
+    max_model_len = max(256, min(derived_cap, max_kv_tokens or 256, PRACTICAL_CPU_LEN_CAP))
+    if max_kv_tokens > 0:
+        max_num_seqs = max(1, min(MAX_NUM_SEQS_CAP, max_kv_tokens // max_model_len))
+    else:
+        max_num_seqs = 1
+
+    total_required_gb = weights_memory_gb + activation_buffer_gb + os_headroom_gb + kv_cache_space_gb
 
     can_fit = True
     recommendations = []
 
-    if total_required_gb > total_ram * 0.7:
+    if spare_gb <= 0 or kv_cache_space_gb < 1:
         can_fit = False
         recommendations.append(
-            f"Model requires {total_required_gb:.2f} GB RAM but only {total_ram:.1f} GB available"
+            f"Model needs {weights_memory_gb + activation_buffer_gb:.2f} GB for weights+activation "
+            f"plus {os_headroom_gb:.1f} GB reserved headroom, leaving no room for a KV cache "
+            f"within {total_ram:.1f} GB"
         )
 
     enforce_eager = True
@@ -381,6 +431,7 @@ def estimate_parameters_cpu(
         "per_gpu_weights_gb": round(weights_memory_gb, 2),
         "activation_memory_gb": round(activation_buffer_gb, 2),
         "compile_workspace_gb": 0.0,
+        "kv_cache_space_gb": kv_cache_space_gb,
         "min_required_memory_gb": round(total_required_gb, 2),
         "can_fit": can_fit,
         "enforce_eager": enforce_eager,
@@ -471,17 +522,9 @@ def estimate_parameters(
 
     # KV cache per token, architecture-aware (independent of enforce_eager).
     kv_dtype_bytes = 2  # fp16/bf16 KV (vLLM default); fp8 KV would halve this.
-    full_layers = full_attention_layer_count(config, num_layers)
-    mla = detect_mla(config)
-    if mla:
-        # MLA stores a small latent per token: no x2, no x heads. Replicated across
-        # TP ranks (not sharded), so it doesn't shrink with tensor parallel.
-        kv_bytes_per_token = (
-            full_layers * (mla["kv_lora_rank"] + mla["qk_rope_head_dim"]) * kv_dtype_bytes
-        )
-    else:
-        kv_heads_per_gpu = max(1, num_kv_heads // tensor_parallel_size)
-        kv_bytes_per_token = 2 * full_layers * kv_heads_per_gpu * head_dim * kv_dtype_bytes
+    kv_bytes_per_token = _kv_bytes_per_token(
+        config, num_layers, num_kv_heads, head_dim, tensor_parallel_size, kv_dtype_bytes
+    )
     kv_cache_per_token_gb = kv_bytes_per_token / (1024**3)
 
     derived_cap = derive_max_model_len(config)

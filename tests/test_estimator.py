@@ -1,5 +1,6 @@
 from vllm_fit.estimator import (
     estimate_parameters,
+    estimate_parameters_cpu,
     _estimate_param_count,
     _select_tensor_parallel,
     get_bytes_per_param,
@@ -311,6 +312,66 @@ def test_estimate_parameters_tolerates_zero_gpus():
            "vocab_size": 32000}
     res = estimate_parameters(cfg, total_vram=24.0, num_gpus=0)
     assert res["tensor_parallel_size"] >= 1
+
+
+def _small_cpu_cfg():
+    return {
+        "hidden_size": 2048,
+        "num_hidden_layers": 24,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "vocab_size": 32000,
+        "intermediate_size": 5632,
+        "max_position_embeddings": 32768,
+    }
+
+
+def test_cpu_sizing_scales_with_ram():
+    # A tiny model on a small quantized footprint: more RAM must buy more context
+    # and never exceed the practical CPU caps.
+    cfg = _small_cpu_cfg()
+    wi = WeightInfo(source="test", weights_bytes=int(1.0 * 1024**3))
+    small = estimate_parameters_cpu(cfg, total_ram=16.0, model_id="", weight_info=wi)
+    large = estimate_parameters_cpu(cfg, total_ram=64.0, model_id="", weight_info=wi)
+
+    assert large["kv_cache_space_gb"] >= small["kv_cache_space_gb"]
+    assert large["max_model_len"] >= small["max_model_len"]
+    assert small["max_model_len"] <= 8192 and large["max_model_len"] <= 8192
+    assert 1 <= small["max_num_seqs"] <= 8
+    assert 1 <= large["max_num_seqs"] <= 8
+
+
+def test_cpu_sizing_leaves_headroom():
+    # The KV space must be a conservative slice of RAM (<=30%), and the full budget
+    # (weights + activation + reserved headroom + KV) must fit inside total RAM so the
+    # machine stays responsive once vLLM is serving.
+    cfg = _small_cpu_cfg()
+    wi = WeightInfo(source="test", weights_bytes=int(3.0 * 1024**3))
+    total_ram = 32.0
+    res = estimate_parameters_cpu(cfg, total_ram=total_ram, model_id="", weight_info=wi)
+
+    assert res["kv_cache_space_gb"] <= total_ram * 0.30 + 1  # +1 for integer rounding
+    assert res["min_required_memory_gb"] <= total_ram
+    assert res["can_fit"] is True
+
+
+def test_cpu_sizing_cannot_fit_when_weights_dominate():
+    # A 30 GB model on 16 GB RAM leaves no room for a KV cache: fail loud, no env var.
+    cfg = _small_cpu_cfg()
+    wi = WeightInfo(source="test", weights_bytes=int(30.0 * 1024**3))
+    res = estimate_parameters_cpu(cfg, total_ram=16.0, model_id="", weight_info=wi)
+
+    assert res["can_fit"] is False
+    assert res["kv_cache_space_gb"] < 1
+    assert res["recommendations"]
+
+
+def test_cpu_max_model_len_capped_at_model_context():
+    # Abundant RAM must not push max_model_len past the model's real context window.
+    cfg = {**_small_cpu_cfg(), "max_position_embeddings": 4096}
+    wi = WeightInfo(source="test", weights_bytes=int(1.0 * 1024**3))
+    res = estimate_parameters_cpu(cfg, total_ram=128.0, model_id="", weight_info=wi)
+    assert res["max_model_len"] <= 4096
 
 
 def test_is_gguf_model():

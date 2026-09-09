@@ -1,3 +1,4 @@
+import platform
 import warnings
 from typing import Dict
 
@@ -52,6 +53,16 @@ def get_ram_info() -> float:
     import psutil
 
     return psutil.virtual_memory().total / (1024**3)
+
+
+def is_apple_silicon() -> bool:
+    """True on Apple Silicon Macs (arm64 Darwin).
+
+    These machines have no CUDA GPU, so ``detect_hardware`` routes them to the CPU
+    backend; this flag lets the CLI relabel the unified-memory pool and print
+    macOS-specific vLLM guidance.
+    """
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
 
 
 def detect_hardware() -> str:
