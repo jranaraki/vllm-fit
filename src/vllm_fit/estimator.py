@@ -437,24 +437,19 @@ def estimate_parameters(
     per_gpu_weights = weights_memory_gb / tensor_parallel_size
 
     quantized = is_model_quantized(config, model_id)
-    enforce_eager = quantized and per_gpu_vram <= 4
-
-    # Per-GPU non-KV budget (weights + transient activation + non-torch + cudagraph).
-    activation_peak_gb = _activation_peak_gb(hidden_size, intermediate_size)
-    non_torch_gb = 0.5 + (0.7 if tensor_parallel_size > 1 else 0.0)
-    cudagraph_gb = 0.0 if enforce_eager else min(3.0, max(0.5, per_gpu_weights * 0.1))
-    non_kv_per_gpu = per_gpu_weights + activation_peak_gb + non_torch_gb + cudagraph_gb
 
     # Recommend a high utilization: weights are fixed, so more headroom => more KV.
     # Leave a small physical margin so vLLM's start-of-run `free >= requested` holds.
     safety_gb = max(0.4, per_gpu_vram * 0.05)
     gpu_memory_utilization = min(0.90, max(0.5, (per_gpu_vram - safety_gb) / per_gpu_vram))
     gpu_memory_utilization = round(gpu_memory_utilization, 2)
-
     requested_gb = gpu_memory_utilization * per_gpu_vram
-    usable_for_kv_gb = requested_gb - non_kv_per_gpu
 
-    # KV cache per token, architecture-aware.
+    # These don't depend on the CUDA-graph lever.
+    activation_peak_gb = _activation_peak_gb(hidden_size, intermediate_size)
+    non_torch_gb = 0.5 + (0.7 if tensor_parallel_size > 1 else 0.0)
+
+    # KV cache per token, architecture-aware (independent of enforce_eager).
     kv_dtype_bytes = 2  # fp16/bf16 KV (vLLM default); fp8 KV would halve this.
     full_layers = full_attention_layer_count(config, num_layers)
     mla = detect_mla(config)
@@ -469,42 +464,71 @@ def estimate_parameters(
         kv_bytes_per_token = 2 * full_layers * kv_heads_per_gpu * head_dim * kv_dtype_bytes
     kv_cache_per_token_gb = kv_bytes_per_token / (1024**3)
 
-    max_kv_tokens = 0
-    if usable_for_kv_gb > 0 and kv_cache_per_token_gb > 0:
-        max_kv_tokens = int(usable_for_kv_gb / kv_cache_per_token_gb)
-
-    # Cap at the model's true context; sliding window bounds per-sequence KV span.
     derived_cap = derive_max_model_len(config)
     window = sliding_window(config)
     absolute_cap = derived_cap if derived_cap else 131072
 
-    max_model_len = min(absolute_cap, max_kv_tokens) if max_kv_tokens > 0 else 512
-    # A single sequence's KV span (capped by the sliding window, if any).
-    kv_span = min(max_model_len, window) if window else max_model_len
-    if not window and max_kv_tokens > 0 and max_model_len > max_kv_tokens:
-        max_model_len = max_kv_tokens
-        kv_span = max_model_len
-    max_model_len = max(256, min(max_model_len, absolute_cap))
+    def _compute_fit(enforce_eager: bool) -> Dict[str, Any]:
+        # torch.compile / CUDA-graph capture; enforce_eager zeroes it (the tight-VRAM lever).
+        cudagraph_gb = 0.0 if enforce_eager else min(3.0, max(0.5, per_gpu_weights * 0.1))
+        non_kv_per_gpu = per_gpu_weights + activation_peak_gb + non_torch_gb + cudagraph_gb
+        usable_for_kv_gb = requested_gb - non_kv_per_gpu
 
-    if max_kv_tokens > 0 and kv_span > 0:
-        max_num_seqs = max(1, min(256, max_kv_tokens // kv_span))
-    else:
-        max_num_seqs = 1
+        max_kv_tokens = 0
+        if usable_for_kv_gb > 0 and kv_cache_per_token_gb > 0:
+            max_kv_tokens = int(usable_for_kv_gb / kv_cache_per_token_gb)
 
-    can_fit = True
+        max_model_len = min(absolute_cap, max_kv_tokens) if max_kv_tokens > 0 else 512
+        kv_span = min(max_model_len, window) if window else max_model_len
+        if not window and max_kv_tokens > 0 and max_model_len > max_kv_tokens:
+            max_model_len = max_kv_tokens
+            kv_span = max_model_len
+        max_model_len = max(256, min(max_model_len, absolute_cap))
+
+        if max_kv_tokens > 0 and kv_span > 0:
+            max_num_seqs = max(1, min(256, max_kv_tokens // kv_span))
+        else:
+            max_num_seqs = 1
+
+        can_fit = not (non_kv_per_gpu >= requested_gb or max_kv_tokens < 256)
+        return {
+            "enforce_eager": enforce_eager,
+            "cudagraph_gb": cudagraph_gb,
+            "non_kv_per_gpu": non_kv_per_gpu,
+            "max_kv_tokens": max_kv_tokens,
+            "max_model_len": max_model_len,
+            "max_num_seqs": max_num_seqs,
+            "can_fit": can_fit,
+        }
+
     recommendations = []
 
-    if per_gpu_weights > per_gpu_vram * 0.95:
-        can_fit = False
+    # Weights alone exceeding the card is unrecoverable — no lever helps.
+    weights_dont_fit = per_gpu_weights > per_gpu_vram * 0.95
+
+    # Start with the heuristic default, then try the enforce-eager lever if tight.
+    initial_eager = quantized and per_gpu_vram <= 4
+    fit = _compute_fit(initial_eager)
+    eager_lever_applied = False
+    if not weights_dont_fit and not fit["can_fit"] and not fit["enforce_eager"]:
+        eager_fit = _compute_fit(True)
+        if eager_fit["can_fit"] or eager_fit["max_kv_tokens"] > fit["max_kv_tokens"]:
+            fit = eager_fit
+            eager_lever_applied = True
+
+    can_fit = fit["can_fit"] and not weights_dont_fit
+    enforce_eager = fit["enforce_eager"]
+
+    if weights_dont_fit:
         recommendations.append(
             f"Model weights ({weights_memory_gb:.2f} GB) require {tensor_parallel_size}x tensor "
             f"parallel but still exceed 95% of per-GPU VRAM ({per_gpu_vram:.1f} GB)"
         )
-    elif non_kv_per_gpu >= requested_gb or max_kv_tokens < 256:
-        can_fit = False
+    elif not can_fit:
         recommendations.append(
-            f"Memory requirements ({non_kv_per_gpu:.2f} GB per GPU for weights+overhead) leave no "
-            f"room for KV cache within {gpu_memory_utilization:.2f}×{per_gpu_vram:.1f} GB"
+            f"Memory requirements ({fit['non_kv_per_gpu']:.2f} GB per GPU for weights+overhead) "
+            f"leave no room for KV cache within {gpu_memory_utilization:.2f}×{per_gpu_vram:.1f} GB"
+            + (" even with --enforce-eager" if enforce_eager else "")
         )
 
     if not can_fit:
@@ -515,8 +539,12 @@ def estimate_parameters(
         recommendations.append(
             "Try a smaller model variant (e.g., 7B instead of 70B, or 0.5B instead of 1.5B)"
         )
+        if not enforce_eager:
+            recommendations.append(
+                "Use --enforce-eager mode to reduce vLLM's memory footprint (may impact performance)"
+            )
         recommendations.append(
-            "Use --enforce-eager mode to reduce vLLM's memory footprint (may impact performance)"
+            "Use --kv-cache-dtype fp8 to roughly halve KV-cache memory and extend context"
         )
         if per_gpu_vram < 8:
             recommendations.append(
@@ -524,20 +552,23 @@ def estimate_parameters(
             )
 
     if enforce_eager and can_fit:
-        recommendations.append(
-            "Using --enforce-eager to avoid torch.compile/CUDA-graph memory overhead on limited VRAM"
+        reason = (
+            "Enabled --enforce-eager: without it, weights+overhead leave no KV-cache room"
+            if eager_lever_applied
+            else "Using --enforce-eager to avoid torch.compile/CUDA-graph memory overhead on limited VRAM"
         )
+        recommendations.append(reason)
 
     return {
         "gpu_memory_utilization": gpu_memory_utilization,
-        "max_model_len": max_model_len,
+        "max_model_len": fit["max_model_len"],
         "tensor_parallel_size": tensor_parallel_size,
-        "max_num_seqs": max_num_seqs,
+        "max_num_seqs": fit["max_num_seqs"],
         "estimated_weights_memory_gb": round(weights_memory_gb, 2),
         "per_gpu_weights_gb": round(per_gpu_weights, 2),
         "activation_memory_gb": round(activation_peak_gb, 2),
-        "compile_workspace_gb": round(cudagraph_gb, 2),
-        "min_required_memory_gb": round(non_kv_per_gpu * tensor_parallel_size, 2),
+        "compile_workspace_gb": round(fit["cudagraph_gb"], 2),
+        "min_required_memory_gb": round(fit["non_kv_per_gpu"] * tensor_parallel_size, 2),
         "can_fit": can_fit,
         "enforce_eager": enforce_eager,
         "recommendations": recommendations,
