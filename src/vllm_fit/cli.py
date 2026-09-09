@@ -16,6 +16,17 @@ app = typer.Typer()
 console = Console()
 
 
+def _load_config(model_id: str):
+    """Fetch the model's config.json, surfacing lookup/offline failures as a clean
+    CLI error (actionable message + exit 1) instead of a raw Python traceback."""
+    try:
+        return get_model_config(model_id)
+    except ValueError as exc:
+        print("[red]❌ Could not load model configuration:[/red]")
+        console.print(str(exc), markup=False)
+        raise typer.Exit(1)
+
+
 def _resolve_weight_info(config_repo_id: str, config: dict):
     """Best-effort exact weight metadata; None on any failure (offline, old hub)."""
     try:
@@ -70,6 +81,9 @@ def _build_vllm_args(
 
     args += ["--max_model_len", str(params["max_model_len"])]
     args += ["--max_num_seqs", str(params["max_num_seqs"])]
+    # The estimator sizes activation headroom for a 2048-token prefill batch; pin
+    # vLLM to the same bound so the served config matches what we reserved for.
+    args += ["--max_num_batched_tokens", "2048"]
 
     if config_repo_id and config_repo_id != model_id.split(":")[0]:
         args += ["--hf-config-path", config_repo_id]
@@ -104,7 +118,7 @@ def recommend(
 ) -> None:
     hardware_type = detect_hardware()
 
-    config, config_repo_id = get_model_config(model_id)
+    config, config_repo_id = _load_config(model_id)
 
     weight_info = _resolve_weight_info(config_repo_id, config)
 
@@ -186,7 +200,7 @@ def profile(
 ) -> None:
     hardware_type = detect_hardware()
 
-    config, config_repo_id = get_model_config(model_id)
+    config, config_repo_id = _load_config(model_id)
 
     if hardware_type == "cpu":
         total_ram = get_ram_info()
@@ -346,7 +360,7 @@ def serve(
 
     hardware_type = detect_hardware()
 
-    config, config_repo_id = get_model_config(model_id)
+    config, config_repo_id = _load_config(model_id)
 
     env = os.environ.copy()
 

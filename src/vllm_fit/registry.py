@@ -102,6 +102,20 @@ def gguf_repo_has_config(repo_id: str) -> bool:
         return False
 
 
+def _load_config_json(config_path: str) -> Optional[Dict[str, Any]]:
+    """Parse a cached config.json, returning None on a corrupt/unreadable file.
+
+    A damaged cache entry (truncated download, disk error) must not surface as a raw
+    ``JSONDecodeError``/``OSError`` traceback — return None so the caller falls through
+    to the next candidate and, ultimately, the actionable error below.
+    """
+    try:
+        with open(config_path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
     repo_id = extract_repo_id(model_id)
 
@@ -115,16 +129,18 @@ def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
                     filename="config.json",
                     force_download=False,
                 )
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-
-                    if has_config and candidate == repo_id:
-                        return config, repo_id
-
-                    if not has_config and candidate != repo_id:
-                        return config, candidate
             except _LOOKUP_ERRORS:
                 continue
+            config = _load_config_json(config_path)
+            if config is None:
+                # Corrupt/unreadable cached config.json: skip this candidate.
+                continue
+
+            if has_config and candidate == repo_id:
+                return config, repo_id
+
+            if not has_config and candidate != repo_id:
+                return config, candidate
 
     for candidate in try_extract_base_model(repo_id):
         try:
@@ -133,11 +149,11 @@ def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
                 filename="config.json",
                 force_download=False,
             )
-            with open(config_path, "r") as f:
-                config = json.load(f)
-                return config, candidate
         except _LOOKUP_ERRORS:
             continue
+        config = _load_config_json(config_path)
+        if config is not None:
+            return config, candidate
 
     offline = os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE")
     offline_hint = (
