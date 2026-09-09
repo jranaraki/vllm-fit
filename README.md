@@ -174,7 +174,7 @@ If you find vllm-fit useful and are interested in citing this work, please use t
   author = {Javad Anaraki},
   title = {vllm-fit: Hardware-Aware vLLM Argument Recommendation and Profiling},
   url = {https://github.com/jranaraki/vllm-fit},
-  version = {0.4.0},
+  version = {0.4.1},
   year = {2026},
 }
 ```
