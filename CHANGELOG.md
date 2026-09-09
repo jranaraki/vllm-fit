@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.4.1 (2026-09-09)
+
+### Bug Fixes
+
+- **estimator**: Apply enforce-eager lever before declaring no-fit
+  ([`61ccf65`](https://github.com/jranaraki/vllm-fit/commit/61ccf65ce34c5e9ff7cfe75012d5d3b2de07b26f))
+
+
 ## v0.4.0 (2026-09-08)
 
 ### Bug Fixes
