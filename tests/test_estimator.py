@@ -1,6 +1,7 @@
 from vllm_fit.estimator import (
     estimate_parameters,
     _estimate_param_count,
+    _select_tensor_parallel,
     get_bytes_per_param,
 )
 from vllm_fit.params import WeightInfo
@@ -276,6 +277,40 @@ def test_bytes_per_param_fp8_dtype():
     assert get_bytes_per_param({"dtype": "float8_e4m3fn"}) == 1.0
     assert get_bytes_per_param({"dtype": "bfloat16"}) == 2.0
     assert get_bytes_per_param({"torch_dtype": "float32"}) == 4.0
+
+
+def test_param_count_handles_string_dims():
+    # Some configs store dimensions as strings; the analytic ladder must coerce
+    # them, not crash on "vocab" * "hidden".
+    cfg = {
+        "hidden_size": "4096",
+        "num_hidden_layers": "2",
+        "num_attention_heads": "32",
+        "vocab_size": "32000",
+        "intermediate_size": "11008",
+    }
+    n = _estimate_param_count(cfg)
+    assert isinstance(n, int)
+    assert n > 0
+
+
+def test_select_tp_excludes_kv_incompatible_degree():
+    # heads=28 is divisible by 7, but kv_heads=4 neither shards (4%7) nor replicates
+    # (7%4) evenly across tp=7 — vLLM would refuse to start, so it must not be chosen.
+    tp = _select_tensor_parallel(
+        weights_gb=100.0, per_gpu_vram=5.0, num_gpus=7, num_heads=28, num_kv_heads=4
+    )
+    assert tp != 7
+    assert 28 % tp == 0
+    assert (4 % tp == 0) or (tp % 4 == 0)
+
+
+def test_estimate_parameters_tolerates_zero_gpus():
+    # Public library call with a non-positive GPU count must not divide by zero.
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+           "vocab_size": 32000}
+    res = estimate_parameters(cfg, total_vram=24.0, num_gpus=0)
+    assert res["tensor_parallel_size"] >= 1
 
 
 def test_is_gguf_model():

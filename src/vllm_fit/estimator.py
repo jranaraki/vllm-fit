@@ -229,13 +229,15 @@ def _estimate_param_count(config: Dict[str, Any]) -> int:
     if param_count:
         return int(param_count)
 
-    n_embed = get_field(config, "hidden_size", 4096)
-    num_layers = get_field(config, "num_hidden_layers", 32)
-    num_heads = get_field(config, "num_attention_heads", 32)
-    num_kv_heads = get_field(config, "num_key_value_heads", num_heads)
-    head_dim = get_head_dim(config) or (n_embed // num_heads if num_heads else n_embed)
-    vocab_size = get_field(config, "vocab_size", 32000)
-    intermediate_size = get_field(config, "intermediate_size", n_embed * 4)
+    # Coerce every dimension to int: some configs store these as strings, and the
+    # arithmetic below would otherwise raise (e.g. "32000" * "4096").
+    n_embed = int(get_field(config, "hidden_size", 4096))
+    num_layers = int(get_field(config, "num_hidden_layers", 32))
+    num_heads = int(get_field(config, "num_attention_heads", 32))
+    num_kv_heads = int(get_field(config, "num_key_value_heads", num_heads))
+    head_dim = int(get_head_dim(config) or (n_embed // num_heads if num_heads else n_embed))
+    vocab_size = int(get_field(config, "vocab_size", 32000))
+    intermediate_size = int(get_field(config, "intermediate_size", n_embed * 4))
 
     kv_dim = num_kv_heads * head_dim
     q_dim = num_heads * head_dim
@@ -247,7 +249,7 @@ def _estimate_param_count(config: Dict[str, Any]) -> int:
     hidden_act = str(config.get("hidden_act", "")).lower()
     mlp_matrices = 2 if hidden_act in _NON_GATED_ACTS else 3
 
-    num_experts = (
+    num_experts = int(
         config.get("num_local_experts")
         or config.get("num_experts")
         or config.get("n_routed_experts")
@@ -299,11 +301,25 @@ def _activation_peak_gb(hidden_size: int, intermediate_size: int, max_num_batche
 def _select_tensor_parallel(
     weights_gb: float, per_gpu_vram: float, num_gpus: int, num_heads: int, num_kv_heads: int
 ) -> int:
-    """Smallest tensor-parallel degree that fits the weight shard, respecting the
-    head-divisibility constraint and preferring not to replicate the KV cache."""
+    """Smallest tensor-parallel degree that fits the weight shard, respecting vLLM's
+    head-divisibility constraints on both attention and KV heads.
+
+    vLLM requires ``num_attention_heads % tp == 0`` and, for the KV heads, either
+    ``num_kv_heads % tp == 0`` (sharded) or ``tp % num_kv_heads == 0`` (replicated).
+    A ``tp`` that violates the KV rule makes vLLM refuse to start, so we exclude it
+    from the candidate set. Choosing the smallest fitting degree naturally minimizes
+    KV replication."""
     if num_gpus <= 1:
         return 1
-    candidates = [tp for tp in range(1, num_gpus + 1) if num_heads and num_heads % tp == 0]
+
+    def _valid_tp(tp: int) -> bool:
+        if not num_heads or num_heads % tp != 0:
+            return False
+        if num_kv_heads:
+            return num_kv_heads % tp == 0 or tp % num_kv_heads == 0
+        return True
+
+    candidates = [tp for tp in range(1, num_gpus + 1) if _valid_tp(tp)]
     if not candidates:
         candidates = [1]
     # Leave ~40% of each GPU for KV + activation + overheads.
@@ -404,6 +420,10 @@ def estimate_parameters(
     weight_info: Any = None,
 ) -> Dict[str, Any]:
     warnings = []
+    # Public entry point: tolerate a non-positive GPU count rather than dividing by
+    # zero when called as a library (the CLI already guards this upstream).
+    if num_gpus < 1:
+        num_gpus = 1
     tc = resolve_text_config(config)
 
     hidden_size = int(get_field(tc, "hidden_size", 4096, warnings))
