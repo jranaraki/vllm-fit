@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.4.2 (2026-09-09)
+
+### Bug Fixes
+
+- **estimator,cli,registry**: Harden config loading and estimator edge cases
+  ([`8914e85`](https://github.com/jranaraki/vllm-fit/commit/8914e85fce017e8150a21054da04877a74ba2dd0))
+
+
 ## v0.4.1 (2026-09-09)
 
 ### Bug Fixes
