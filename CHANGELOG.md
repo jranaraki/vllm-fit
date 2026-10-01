@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.11 (2026-10-01)
+
+### Bug Fixes
+
+- **gpu**: Honor CUDA_VISIBLE_DEVICES and pin the GPUs that were sized
+  ([`7656af8`](https://github.com/jranaraki/vllm-fit/commit/7656af80002f0f2f516c5e03b0da44bf18e4288b))
+
+
 ## v0.5.10 (2026-10-01)
 
 ### Bug Fixes
