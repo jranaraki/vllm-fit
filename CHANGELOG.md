@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.7 (2026-10-01)
+
+### Bug Fixes
+
+- **profile**: Surface vLLM errors instead of treating every failure as OOM
+  ([`d8a8eb4`](https://github.com/jranaraki/vllm-fit/commit/d8a8eb4e4e5243065adcbe3dc7a1185f90d77174))
+
+
 ## v0.5.6 (2026-10-01)
 
 ### Bug Fixes
