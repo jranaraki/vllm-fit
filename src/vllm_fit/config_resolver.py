@@ -25,6 +25,7 @@ are importable — validates our resolution against ``PretrainedConfig.get_text_
 never requires the network.
 """
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -247,46 +248,106 @@ def detect_mla(config: Dict[str, Any]) -> Optional[Dict[str, int]]:
     return None
 
 
-def full_attention_layer_count(config: Dict[str, Any], num_layers: int) -> int:
-    """Number of layers that hold a full (global) KV cache.
+_FULL_TYPES = ("full_attention", "attention", "full", "global")
+_SLIDING_TYPES = ("sliding_attention", "sliding", "local", "local_attention")
 
-    Hybrid models interleave full-attention layers with linear-attention / SSM /
-    Mamba layers that keep little or no KV cache. Counting all layers as full (the
-    old behavior) massively overestimates KV memory. When the pattern can't be read,
-    fall back to ``num_layers`` (a safe overestimate rather than a risky undercount).
+
+@dataclass
+class AttentionLayout:
+    """How a model's layers hold KV cache.
+
+    ``full_layers`` keep KV for the whole sequence. ``sliding_layers`` keep at most
+    ``window`` tokens (sliding-window or chunked-local attention). All other layers
+    (linear attention, Mamba/SSM) keep no per-token KV.
+    """
+
+    full_layers: int
+    sliding_layers: int = 0
+    window: Optional[int] = None
+
+
+def attention_layout(config: Dict[str, Any], num_layers: int) -> AttentionLayout:
+    """Split layers into full / sliding-window / KV-free, mirroring how transformers
+    expands per-layer attention patterns. When the pattern can't be read, every layer
+    is treated as full attention (a safe overestimate rather than a risky undercount).
     """
     tc = resolve_text_config(config)
     if not isinstance(tc, dict) or not num_layers:
-        return num_layers
+        return AttentionLayout(num_layers)
+
+    window = tc.get("sliding_window")
+    window = int(window) if isinstance(window, (int, float)) and window > 0 else None
+    model_type = str(tc.get("model_type") or config.get("model_type") or "").lower()
 
     layer_types = tc.get("layer_types")
     if isinstance(layer_types, list) and layer_types:
-        n = sum(
-            1
-            for t in layer_types
-            if isinstance(t, str) and t.lower() in ("full_attention", "attention", "full")
-        )
-        return n if n > 0 else num_layers
+        types = [str(t).lower() for t in layer_types]
+        full = sum(1 for t in types if t in _FULL_TYPES)
+        chunked = sum(1 for t in types if t == "chunked_attention")
+        sliding = sum(1 for t in types if t in _SLIDING_TYPES)
+        chunk = tc.get("attention_chunk_size")
+        if chunked and isinstance(chunk, int) and chunk > 0 and not sliding:
+            return AttentionLayout(full, chunked, chunk)
+        full += chunked  # chunk size unknown: count as full
+        if sliding and window:
+            return AttentionLayout(full, sliding, window)
+        full += sliding
+        return AttentionLayout(full if full > 0 else num_layers)
+
+    # Gemma-3 / Cohere2: every P-th layer is global, the rest are local.
+    pattern = tc.get("sliding_window_pattern")
+    if isinstance(pattern, int) and pattern > 1 and window:
+        full = num_layers // pattern
+        return AttentionLayout(full, num_layers - full, window)
+
+    # Gemma-2: local and global layers alternate, starting with local.
+    if model_type == "gemma2" and window:
+        full = num_layers // 2
+        return AttentionLayout(full, num_layers - full, window)
+
+    # Nemotron-H: one character per layer; "*" is attention, "M" Mamba, "-" MLP.
+    hybrid = tc.get("hybrid_override_pattern")
+    if isinstance(hybrid, str) and hybrid:
+        full = hybrid.count("*")
+        return AttentionLayout(full if full > 0 else num_layers)
+
+    # Zamba and similar: per-layer block types.
+    block_types = tc.get("layers_block_type")
+    if isinstance(block_types, list) and block_types:
+        full = sum(1 for t in block_types if str(t).lower() in ("attention", "hybrid"))
+        return AttentionLayout(full if full > 0 else num_layers)
 
     indices = tc.get("attn_layer_indices")
     if isinstance(indices, list) and indices:
-        return len(indices)
+        return AttentionLayout(len(indices))
 
     interval = tc.get("full_attention_interval")
     if isinstance(interval, int) and interval > 0:
-        return max(1, num_layers // interval)
+        return AttentionLayout(max(1, num_layers // interval))
 
     period = tc.get("attn_layer_period")
     if isinstance(period, int) and period > 0:
         offset = int(tc.get("attn_layer_offset", 0) or 0)
-        return max(1, len([i for i in range(num_layers) if i % period == offset % period]))
+        return AttentionLayout(
+            max(1, len([i for i in range(num_layers) if i % period == offset % period]))
+        )
 
     type_list = tc.get("attn_type_list")
     if isinstance(type_list, list) and type_list:
         n = sum(1 for t in type_list if t in (1, True, "1", "attention", "full"))
-        return n if n > 0 else num_layers
+        return AttentionLayout(n if n > 0 else num_layers)
 
-    return num_layers
+    # Uniform sliding window on every layer (e.g. Mistral-7B-v0.1).
+    uniform = sliding_window(config)
+    if uniform:
+        return AttentionLayout(0, num_layers, uniform)
+
+    return AttentionLayout(num_layers)
+
+
+def full_attention_layer_count(config: Dict[str, Any], num_layers: int) -> int:
+    """Number of layers that keep KV for the whole sequence."""
+    return attention_layout(config, num_layers).full_layers
 
 
 def sliding_window(config: Dict[str, Any]) -> Optional[int]:
