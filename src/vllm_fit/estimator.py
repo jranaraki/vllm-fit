@@ -84,9 +84,8 @@ def _dtype_bytes(config: Dict[str, Any]) -> float:
     ``dtype`` around v4.56) with a ``torch_dtype`` fallback.
     """
     dtype = str(config.get("dtype") or config.get("torch_dtype") or "").lower()
-    if dtype in ("float32", "float", "fp32"):
-        return 4.0
-    if dtype in ("float16", "half", "fp16", "bfloat16", "bf16"):
+    # float32 checkpoints are served at 16-bit: vLLM's dtype=auto downcasts them.
+    if dtype in ("float32", "float", "fp32", "float16", "half", "fp16", "bfloat16", "bf16"):
         return 2.0
     if dtype in ("float8", "fp8", "float8_e4m3fn", "float8_e5m2", "e4m3", "e5m2", "f8_e4m3", "f8_e5m2"):
         return 1.0

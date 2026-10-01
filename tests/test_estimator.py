@@ -303,7 +303,8 @@ def test_bytes_per_param_gguf_effective_bpw():
 def test_bytes_per_param_fp8_dtype():
     assert get_bytes_per_param({"dtype": "float8_e4m3fn"}) == 1.0
     assert get_bytes_per_param({"dtype": "bfloat16"}) == 2.0
-    assert get_bytes_per_param({"torch_dtype": "float32"}) == 4.0
+    # vLLM serves float32 checkpoints at 16-bit (dtype=auto downcasts).
+    assert get_bytes_per_param({"torch_dtype": "float32"}) == 2.0
 
 
 def test_param_count_handles_string_dims():

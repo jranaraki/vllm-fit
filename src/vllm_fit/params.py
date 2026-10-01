@@ -40,6 +40,15 @@ def _st_dtype_bytes(dtype: str) -> float:
     return _ST_DTYPE_BYTES.get(str(dtype).upper(), 2.0)
 
 
+def _serving_bytes(dtype: str) -> float:
+    """Bytes per element once loaded by vLLM. With ``dtype=auto`` vLLM downcasts
+    float32 checkpoints to 16-bit and casts float tensors to the model dtype, so
+    F32/F64 storage costs 2 bytes on device. Integer (packed-quant) dtypes are kept."""
+    if str(dtype).upper() in ("F32", "F64"):
+        return 2.0
+    return _st_dtype_bytes(dtype)
+
+
 @dataclass
 class WeightInfo:
     """Result of the size ladder. ``total_params`` and/or ``weights_bytes`` may be set;
@@ -70,7 +79,7 @@ def _from_safetensors_metadata(repo_id: str) -> Optional[WeightInfo]:
     if not per_dtype:
         return None
     total = int(sum(per_dtype.values()))
-    weights_bytes = int(sum(c * _st_dtype_bytes(dt) for dt, c in per_dtype.items()))
+    weights_bytes = int(sum(c * _serving_bytes(dt) for dt, c in per_dtype.items()))
     return WeightInfo(
         source="safetensors_metadata",
         total_params=total,
@@ -118,7 +127,7 @@ def _from_model_info(repo_id: str) -> Optional[WeightInfo]:
     total = getattr(st, "total", None)
     if per_dtype:
         total = int(total) if total else int(sum(per_dtype.values()))
-        weights_bytes = int(sum(c * _st_dtype_bytes(dt) for dt, c in per_dtype.items()))
+        weights_bytes = int(sum(c * _serving_bytes(dt) for dt, c in per_dtype.items()))
         return WeightInfo(
             source="model_info",
             total_params=total,
