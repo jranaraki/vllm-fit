@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.4 (2026-10-01)
+
+### Bug Fixes
+
+- Cap gpu_memory_utilization by currently free VRAM
+  ([`d5e0238`](https://github.com/jranaraki/vllm-fit/commit/d5e0238231ecb39626bb5401c07c30a0b575d9c3))
+
+
 ## v0.5.3 (2026-10-01)
 
 ### Bug Fixes
