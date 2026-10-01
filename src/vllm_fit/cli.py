@@ -7,15 +7,23 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .engine_tester import DEFAULT_TIMEOUT, profile_parameters, profile_parameters_cpu
-from .estimator import _CUDA_CONTEXT_GB, estimate_parameters, estimate_parameters_cpu
+from .estimator import (
+    _CUDA_CONTEXT_GB,
+    estimate_parameters,
+    estimate_parameters_cpu,
+    estimate_parameters_metal,
+)
 from .hardware import (
     UnsupportedHardwareError,
     detect_hardware,
+    get_available_ram,
     get_free_vram_info,
+    get_metal_working_set,
     get_ram_info,
     get_vram_info,
     gpu_launch_env,
     is_apple_silicon,
+    metal_backend_available,
 )
 from .params import resolve_weights
 from .registry import get_model_config
@@ -43,18 +51,40 @@ def _resolve_weight_info(config_repo_id: str, config: dict):
         return None
 
 
-def _print_mac_guidance() -> None:
-    """On Apple Silicon, explain the vLLM-on-macOS reality (informational only)."""
+def _print_mac_guidance(hardware_type: str = "cpu") -> None:
+    """On Apple Silicon, say which vLLM backend is being sized (informational only)."""
     if not is_apple_silicon():
         return
-    print("[cyan]🍎 Apple Silicon detected — vLLM runs on the CPU backend here.[/cyan]")
+    if hardware_type == "metal":
+        print("[cyan]🍎 Apple Silicon with vllm-metal — sizing for the Apple GPU (Metal/MLX).[/cyan]")
+        print(
+            "[dim]  • The KV cache is a share (--gpu-memory-utilization) of Metal's working-set\n"
+            "    limit, not of total unified memory.\n"
+            "  • vllm-metal runs a single GPU (tensor_parallel_size 1).[/dim]"
+        )
+        print()
+        return
+    print("[cyan]🍎 Apple Silicon detected — sizing for vLLM's CPU backend.[/cyan]")
+    hint = (
+        "  • To serve on the Apple GPU, install the 'vllm-metal' plugin, or run vllm-fit\n"
+        "    from the environment where it is installed (or pass --device metal).\n"
+    )
     print(
-        "[dim]  • Native vLLM on macOS is a source build (no prebuilt wheels), CPU-only "
-        "(no Apple-GPU acceleration), FP32/FP16, and experimental.\n"
-        "  • For Metal GPU inference, see the community 'vllm-metal' (MLX) plugin instead.\n"
-        "  • Memory below is the shared unified-memory pool.[/dim]"
+        "[dim]  • Native vLLM on macOS is a source build and CPU-only without vllm-metal.\n"
+        + hint
+        + "  • Memory below is the shared unified-memory pool.[/dim]"
     )
     print()
+
+
+def _metal_params(config: dict, model_id: str, weight_info) -> dict:
+    working_set, measured = get_metal_working_set()
+    print(f"Metal working set: {working_set:.1f} GB (of {get_ram_info():.1f} GB unified memory)")
+    print()
+    return estimate_parameters_metal(
+        config, working_set, model_id, weight_info=weight_info,
+        available_ram_gb=get_available_ram(), working_set_measured=measured,
+    )
 
 
 def _ram_label() -> str:
@@ -116,8 +146,8 @@ def free_vram_for_sizing(vram_info: dict, gpuids: list[int]) -> Optional[float]:
 
 def _detect_hardware(device: str, gpuid: str) -> str:
     """Resolve the target hardware, exiting with a clear message when it can't be sized."""
-    if device not in ("auto", "gpu", "cpu"):
-        print(f"[red]--device must be 'auto', 'gpu' or 'cpu', not '{device}'[/red]")
+    if device not in ("auto", "gpu", "metal", "cpu"):
+        print(f"[red]--device must be 'auto', 'gpu', 'metal' or 'cpu', not '{device}'[/red]")
         raise typer.Exit(2)
     try:
         hardware_type = detect_hardware(device)
@@ -126,8 +156,13 @@ def _detect_hardware(device: str, gpuid: str) -> str:
         if device == "auto":
             print("[dim]Pass --device cpu to size for vLLM's CPU backend instead.[/dim]")
         raise typer.Exit(1)
-    if hardware_type == "cpu" and gpuid != "all":
-        print(f"[yellow]⚠ --gpuid {gpuid} ignored: sizing for the CPU backend[/yellow]")
+    if hardware_type in ("cpu", "metal") and gpuid != "all":
+        print(f"[yellow]⚠ --gpuid {gpuid} ignored: sizing for the {hardware_type.upper()} backend[/yellow]")
+    if hardware_type == "metal" and not metal_backend_available():
+        print(
+            "[yellow]⚠ vllm-metal isn't installed in this Python environment; the command "
+            "below needs it wherever you run vLLM.[/yellow]"
+        )
     return hardware_type
 
 
@@ -150,7 +185,7 @@ def _build_vllm_args(
     """Build the `vllm serve` argument list for the given parameters."""
     args = ["vllm", "serve", model_id]
 
-    if hardware_type == "gpu":
+    if hardware_type in ("gpu", "metal"):
         args += ["--gpu_memory_utilization", str(params["gpu_memory_utilization"])]
         args += ["--tensor_parallel_size", str(params["tensor_parallel_size"])]
 
@@ -230,7 +265,7 @@ def recommend(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
     device: str = typer.Option(
-        "auto", "--device", help="Hardware to size for: 'auto', 'gpu' or 'cpu'"
+        "auto", "--device", help="Hardware to size for: 'auto', 'gpu', 'metal' or 'cpu'"
     ),
 ) -> None:
     hardware_type = _detect_hardware(device, gpuid)
@@ -247,6 +282,10 @@ def recommend(
         print()
         print("[dim]Using CPU mode (no GPU detected)[/dim]")
         print()
+        _print_warnings(params)
+    elif hardware_type == "metal":
+        _print_mac_guidance("metal")
+        params = _metal_params(config, model_id, weight_info)
         _print_warnings(params)
     else:
         vram_info = get_vram_info()
@@ -298,7 +337,7 @@ def recommend(
         )
     )
     print(f"model_id: {model_id}")
-    if hardware_type == "gpu":
+    if hardware_type in ("gpu", "metal"):
         print(f"gpu_memory_utilization: {params['gpu_memory_utilization']}")
     print(f"max_model_len: {params['max_model_len']}")
     print(f"tensor_parallel_size: {params['tensor_parallel_size']}")
@@ -324,7 +363,7 @@ def profile(
         help="Seconds to wait for each vLLM test launch before giving up",
     ),
     device: str = typer.Option(
-        "auto", "--device", help="Hardware to size for: 'auto', 'gpu' or 'cpu'"
+        "auto", "--device", help="Hardware to size for: 'auto', 'gpu', 'metal' or 'cpu'"
     ),
 ) -> None:
     hardware_type = _detect_hardware(device, gpuid)
@@ -390,28 +429,36 @@ def profile(
             _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type, gpuids if hardware_type == 'gpu' else None)
         )
     else:
-        vram_info = get_vram_info()
-        gpuids = parse_gpu_ids(gpuid, vram_info)
+        if hardware_type == "metal":
+            _print_mac_guidance("metal")
+            gpuids = []
+            weight_info = _resolve_weight_info(config_repo_id, config)
+            initial_params = _metal_params(config, model_id, weight_info)
+            initial_params["gpu_ids"] = []
+            print("[yellow]Using the Apple GPU (Metal)[/yellow]")
+        else:
+            vram_info = get_vram_info()
+            gpuids = parse_gpu_ids(gpuid, vram_info)
 
-        if not gpuids:
-            print("[red]No valid GPUs specified[/red]")
-            _show_no_hardware_error()
-            raise typer.Exit(1)
+            if not gpuids:
+                print("[red]No valid GPUs specified[/red]")
+                _show_no_hardware_error()
+                raise typer.Exit(1)
 
-        num_gpus = len(gpuids)
-        total_vram = sum(vram_info[gid] for gid in gpuids)
-        weight_info = _resolve_weight_info(config_repo_id, config)
-        initial_params = estimate_parameters(
-            config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
-            model_id=model_id, weight_info=weight_info,
-            free_vram=free_vram_for_sizing(vram_info, gpuids),
-        )
-        initial_params["gpu_ids"] = gpuids
+            num_gpus = len(gpuids)
+            total_vram = sum(vram_info[gid] for gid in gpuids)
+            weight_info = _resolve_weight_info(config_repo_id, config)
+            initial_params = estimate_parameters(
+                config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
+                model_id=model_id, weight_info=weight_info,
+                free_vram=free_vram_for_sizing(vram_info, gpuids),
+            )
+            initial_params["gpu_ids"] = gpuids
 
-        print(
-            f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
-        )
-        _print_mixed_gpu_warning(vram_info, gpuids)
+            print(
+                f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
+            )
+            _print_mixed_gpu_warning(vram_info, gpuids)
         print("[yellow]🔍 Starting dynamic profiling...[/yellow]")
         print()
         _print_warnings(initial_params)
@@ -475,7 +522,7 @@ def serve(
         help="Seconds to wait for each vLLM test launch before giving up",
     ),
     device: str = typer.Option(
-        "auto", "--device", help="Hardware to size for: 'auto', 'gpu' or 'cpu'"
+        "auto", "--device", help="Hardware to size for: 'auto', 'gpu', 'metal' or 'cpu'"
     ),
 ) -> None:
     import os
@@ -511,27 +558,34 @@ def serve(
         if kv_space:
             env["VLLM_CPU_KVCACHE_SPACE"] = str(kv_space)
     else:
-        vram_info = get_vram_info()
-        gpuids = parse_gpu_ids(gpuid, vram_info)
+        if hardware_type == "metal":
+            _print_mac_guidance("metal")
+            gpuids = []
+            initial_params = _metal_params(config, model_id, weight_info)
+            initial_params["gpu_ids"] = []
+            print("[yellow]Using the Apple GPU (Metal)[/yellow]")
+        else:
+            vram_info = get_vram_info()
+            gpuids = parse_gpu_ids(gpuid, vram_info)
 
-        if not gpuids:
-            print("[red]No valid GPUs specified[/red]")
-            _show_no_hardware_error()
-            raise typer.Exit(1)
+            if not gpuids:
+                print("[red]No valid GPUs specified[/red]")
+                _show_no_hardware_error()
+                raise typer.Exit(1)
 
-        num_gpus = len(gpuids)
-        total_vram = sum(vram_info[gid] for gid in gpuids)
-        initial_params = estimate_parameters(
-            config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
-            model_id=model_id, weight_info=weight_info,
-            free_vram=free_vram_for_sizing(vram_info, gpuids),
-        )
-        initial_params["gpu_ids"] = gpuids
+            num_gpus = len(gpuids)
+            total_vram = sum(vram_info[gid] for gid in gpuids)
+            initial_params = estimate_parameters(
+                config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
+                model_id=model_id, weight_info=weight_info,
+                free_vram=free_vram_for_sizing(vram_info, gpuids),
+            )
+            initial_params["gpu_ids"] = gpuids
 
-        print(
-            f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
-        )
-        _print_mixed_gpu_warning(vram_info, gpuids)
+            print(
+                f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
+            )
+            _print_mixed_gpu_warning(vram_info, gpuids)
         print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
         print()
         _print_warnings(initial_params)
@@ -543,7 +597,8 @@ def serve(
             timeout=timeout,
             config_repo_id=config_repo_id,
         )
-        env.update(gpu_launch_env(gpuids))
+        if hardware_type == "gpu":
+            env.update(gpu_launch_env(gpuids))
 
     if not params.get("profiling_success", False):
         print()

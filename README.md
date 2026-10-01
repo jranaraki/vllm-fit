@@ -12,7 +12,8 @@ A CLI tool designed to simply _recommend_ (conservative), and/or _profile_ (to m
 - **Dynamic Profiling**: Launches vLLM with candidate settings to confirm they start, shrinking only on memory failures; any other vLLM error stops profiling and is shown
 - **Multi-GPU Support**: Tensor-parallel sizing that respects head divisibility and the smallest selected GPU
 - **Free-memory aware**: `gpu_memory_utilization` is capped so vLLM's startup check passes even when other processes hold GPU memory
-- **CPU & Apple Silicon**: Sizes for vLLM's CPU backend when no GPU is present and emits a complete CPU serve command
+- **Apple Silicon GPU**: With the [`vllm-metal`](https://github.com/vllm-project/vllm-metal) plugin installed, sizes for the Apple GPU against Metal's working-set limit
+- **CPU**: Sizes for vLLM's CPU backend when no GPU is present and emits a complete CPU serve command
 
 ## Quick Start
 
@@ -33,7 +34,7 @@ uv pip install git+https://github.com/jranaraki/vllm-fit
 ### `recommend` - Quick parameter suggestions
 
 ```
-vllm-fit recommend <model_id> [--gpuid <ids>] [--device auto|gpu|cpu]
+vllm-fit recommend <model_id> [--gpuid <ids>] [--device auto|gpu|metal|cpu]
 ```
 
 Returns estimated optimal parameters without running the model.
@@ -41,7 +42,7 @@ Returns estimated optimal parameters without running the model.
 ### `profile` - Find actual memory limits
 
 ```
-vllm-fit profile <model_id> [--gpuid <ids>] [--device auto|gpu|cpu] [--timeout <seconds>]
+vllm-fit profile <model_id> [--gpuid <ids>] [--device auto|gpu|metal|cpu] [--timeout <seconds>]
 ```
 
 Launches vLLM with candidate settings to find what actually starts on your hardware.
@@ -50,7 +51,7 @@ Exits non-zero (and prints no command) if no configuration could be verified.
 ### `serve` - Start vLLM server
 
 ```
-vllm-fit serve <model_id> [--gpuid <ids>] [--device auto|gpu|cpu] [--timeout <seconds>]
+vllm-fit serve <model_id> [--gpuid <ids>] [--device auto|gpu|metal|cpu] [--timeout <seconds>]
 ```
 
 Profiles, then starts an optimized vLLM OpenAI-compatible server.
@@ -74,16 +75,37 @@ its `config.json` and safetensors headers are read directly.
 
 ### Device and timeout
 
-- `--device auto` (default) sizes for NVIDIA GPUs when they're visible and for vLLM's
-  CPU backend when no accelerator is present. If an accelerator vllm-fit can't size is
+- `--device auto` (default) sizes for NVIDIA GPUs when they're visible, for the Apple
+  GPU when the `vllm-metal` plugin is installed on Apple Silicon, and for vLLM's CPU
+  backend when no accelerator is present. If an accelerator vllm-fit can't size is
   found (AMD/Intel/TPU, or an NVIDIA driver whose GPUs can't be queried), it stops
-  with an explanation instead of silently sizing for the CPU. `--device cpu` or
-  `--device gpu` overrides detection.
+  with an explanation instead of silently sizing for the CPU. `--device cpu`,
+  `--device gpu` or `--device metal` overrides detection.
 - `--timeout` (default 900) is how long each vLLM test launch may take, including
   weight loading and compilation. A timeout is reported as inconclusive, not as
   "doesn't fit".
 
-### CPU & Apple Silicon Mode
+### Apple Silicon (vllm-metal)
+
+On a Mac with the [`vllm-metal`](https://github.com/vllm-project/vllm-metal) plugin
+installed in the same Python environment as vllm-fit, all three commands size for the
+Apple GPU:
+
+- vllm-metal gives the KV cache `--gpu-memory-utilization` × Metal's recommended
+  working set (read from MLX; e.g. 37.4 GB of 48 GB unified memory) minus the weights
+  and a profiled overhead, so that limit, not total RAM, is the base.
+- Utilization is also capped by the unified memory free right now, since going over
+  it means swapping rather than a clean failure.
+- The command has no CPU-only settings and uses one GPU:
+
+  ```
+  vllm serve mlx-community/gpt-oss-20b-MXFP4-Q8 --gpu_memory_utilization 0.9 --tensor_parallel_size 1 --max_model_len 131072 --max_num_seqs 6
+  ```
+
+If vllm-fit runs in a different environment from vllm-metal, pass `--device metal`.
+Without MLX, the working set is assumed to be ⅔ of RAM and a warning says so.
+
+### CPU Mode
 
 All three commands auto-detect your hardware. When no NVIDIA GPU is found,
 vllm-fit runs in CPU mode automatically (no flag needed; `--gpuid` is ignored with a warning):
@@ -99,10 +121,9 @@ vllm-fit runs in CPU mode automatically (no flag needed; `--gpuid` is ignored wi
   VLLM_CPU_KVCACHE_SPACE=14 vllm serve <model_id> --max_model_len 8192 --max_num_seqs 8 --max_num_batched_tokens 8192 --enforce-eager
   ```
 
-- **Apple Silicon** — Macs are detected and reported against their unified-memory
-  pool. Note that native vLLM on macOS is a source build, CPU-only (no Apple-GPU
-  acceleration), and experimental; for Metal GPU inference, see the community
-  [`vllm-metal`](https://github.com/vllm-project/vllm-metal) (MLX) plugin.
+- **Apple Silicon without vllm-metal** — sized for vLLM's CPU backend against the
+  unified-memory pool. Native vLLM on macOS is a source build and CPU-only without the
+  plugin.
 
 ## Output
 
@@ -172,7 +193,8 @@ page, then set `HF_TOKEN` or run `hf auth login`.
 1. Ensure vLLM CPU version is installed (not GPU version)
 2. Check available RAM: `python -c "import psutil; print(psutil.virtual_memory().total / 1024**3)"` (need 16GB+ recommended)
 3. Try a smaller model or quantized GGUF format
-4. On macOS, vLLM has no prebuilt wheel — build it from source (CPU-only), or use the `vllm-metal` plugin for Apple-GPU inference
+4. On macOS, install the `vllm-metal` plugin for Apple-GPU inference (vllm-fit then sizes
+   for Metal), or build vLLM from source for the CPU backend
 
 ### Model won't fit?
 
@@ -233,12 +255,16 @@ startup log (`Model loading took … GiB`, `GPU KV cache size: … tokens`) when
   budget, capped by the model's limit as vLLM derives it. **`max_num_seqs`** is how
   many such full-length requests fit at once, so it can be 1 on small GPUs. vLLM
   still serves shorter requests concurrently up to that cap.
+- **Apple GPU (vllm-metal)**: KV budget = utilization × Metal working set − weights −
+  (0.6 GB + activation), the same layer-aware KV model as on NVIDIA. Checked against
+  real vllm-metal startups: predicted KV budget within 1.2% (always below) for
+  Qwen3-0.6B, Qwen3-Coder-30B-A3B 4-bit and gpt-oss-20b.
 - **CPU backend**: ~20% of RAM is left for the OS, the KV cache gets at most half of
   what remains (and ≤30% of RAM), context is capped at 8192 and concurrency at 8.
 
 ### Known limitations
 
-- Only NVIDIA GPUs and vLLM's CPU backend are sized. MIG slices and pipeline
+- Only NVIDIA GPUs, Apple GPUs via vllm-metal and vLLM's CPU backend are sized. MIG slices and pipeline
   parallelism are not modelled.
 - Multimodal encoders' activation memory and fp8 KV cache are not modelled.
 - Overhead constants are approximate and can drift between vLLM releases.

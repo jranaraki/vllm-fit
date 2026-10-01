@@ -413,6 +413,10 @@ def _recurrent_state_bytes(
 # vLLM allocates KV in pages of this many tokens (default block size on GPU and CPU).
 KV_BLOCK_SIZE = 16
 
+# Scheduler steps whose tokens can be in flight at once (VllmConfig.max_concurrent_batches:
+# 2 with async scheduling, vLLM's default).
+_MAX_CONCURRENT_BATCHES = 2
+
 
 def _blocks(tokens: int) -> int:
     return -(-tokens // KV_BLOCK_SIZE)
@@ -428,14 +432,16 @@ def _kv_bytes_per_request(
     """KV memory one request of ``max_model_len`` tokens needs.
 
     Full layers hold every token. Sliding-window layers hold at most the window plus
-    the tokens scheduled in one step, as in vLLM's SlidingWindowSpec. Mamba /
+    the tokens of the in-flight steps, as in vLLM's SlidingWindowSpec. Mamba /
     linear-attention layers add a fixed ``state_bytes`` regardless of length.
     """
     full_span = _blocks(max_model_len)
     sliding_span = full_span
     if layout.sliding_layers and layout.window:
-        # SlidingWindowSpec: the window plus one step, in whole blocks, plus one block.
-        sliding_span = _blocks(min(max_model_len, layout.window - 1 + batched_tokens)) + 1
+        # SlidingWindowSpec: the window plus every in-flight step, in whole blocks, plus
+        # one block. With async scheduling (vLLM's default) two batches are in flight.
+        in_flight = _MAX_CONCURRENT_BATCHES * batched_tokens
+        sliding_span = _blocks(min(max_model_len, layout.window - 1 + in_flight)) + 1
     return state_bytes + KV_BLOCK_SIZE * per_layer_token * (
         layout.full_layers * full_span + layout.sliding_layers * sliding_span
     )
@@ -819,6 +825,119 @@ def estimate_parameters(
         "min_required_memory_gb": round(fit["non_kv_per_gpu"] * tensor_parallel_size, 2),
         "can_fit": can_fit,
         "enforce_eager": enforce_eager,
+        "recommendations": recommendations,
+        "warnings": warnings,
+    }
+
+
+# vllm-metal (Apple GPU via MLX). It sizes the KV cache as
+#   max_recommended_working_set x --gpu-memory-utilization - model memory - overhead
+# where overhead comes from a profiling run (vllm_metal/v1/cache_policy.py). Measured on
+# an M-series Mac at 0.9 utilization: 0.56 GB (Qwen3-0.6B) and 0.87 GB
+# (Qwen3-Coder-30B-A3B 4-bit) of overhead beyond the weights.
+_METAL_BASE_OVERHEAD_GB = 0.6
+_METAL_BATCHED_TOKENS = 2048    # vllm-metal enables chunked prefill at this size
+_METAL_MIN_BLOCKS = 16          # vllm-metal refuses to start with fewer KV blocks
+_METAL_FREE_RAM_MARGIN_GB = 2.0  # left for the OS when capping by currently free RAM
+
+
+def estimate_parameters_metal(
+    config: Dict[str, Any],
+    working_set_gb: float,
+    model_id: str = "",
+    weight_info: Any = None,
+    available_ram_gb: Optional[float] = None,
+    working_set_measured: bool = True,
+) -> Dict[str, Any]:
+    """Sizing for vllm-metal on Apple Silicon (single GPU, unified memory).
+
+    ``working_set_gb`` is Metal's recommended max working set, the base that
+    --gpu-memory-utilization applies to. ``available_ram_gb``, when known, caps
+    utilization: vllm-metal doesn't check free memory, and exceeding it on unified
+    memory means swapping rather than a clean failure.
+    """
+    warnings = []
+    tc = resolve_text_config(config)
+
+    hidden_size = int(get_field(tc, "hidden_size", 4096, warnings))
+    num_layers = int(get_field(tc, "num_hidden_layers", 32, warnings))
+    num_attention_heads = int(get_field(tc, "num_attention_heads", 32, warnings))
+    num_kv_heads = int(get_field(tc, "num_key_value_heads", num_attention_heads))
+    head_dim = int(get_head_dim(tc) or (hidden_size // num_attention_heads if num_attention_heads else hidden_size))
+    intermediate_size = int(get_field(tc, "intermediate_size", hidden_size * 4))
+
+    if not working_set_measured:
+        warnings.append(
+            f"couldn't read Metal's working-set limit (MLX not importable here); assumed "
+            f"{working_set_gb:.1f} GB. Run vllm-fit in the environment where vllm-metal is "
+            f"installed for an exact figure"
+        )
+
+    weights_memory_gb = _weights_gb(tc, config, model_id, weight_info, warnings)
+
+    gpu_memory_utilization = 0.9
+    if available_ram_gb is not None and working_set_gb > 0:
+        free_cap = math.floor(
+            (available_ram_gb - _METAL_FREE_RAM_MARGIN_GB) / working_set_gb * 100
+        ) / 100
+        if free_cap < gpu_memory_utilization:
+            gpu_memory_utilization = max(0.0, free_cap)
+            warnings.append(
+                f"only {available_ram_gb:.1f} GB of unified memory is free right now; "
+                f"gpu_memory_utilization lowered to {gpu_memory_utilization:.2f} to avoid swapping"
+            )
+    requested_gb = gpu_memory_utilization * working_set_gb
+
+    activation_gb = _activation_peak_gb(hidden_size, intermediate_size, _METAL_BATCHED_TOKENS)
+    overhead_gb = _METAL_BASE_OVERHEAD_GB + activation_gb
+    non_kv_gb = weights_memory_gb + overhead_gb
+
+    kv_dtype_bytes = 2
+    layout = attention_layout(config, num_layers)
+    per_layer_token = _kv_bytes_per_layer_token(config, num_kv_heads, head_dim, 1, kv_dtype_bytes)
+    state_bytes = _recurrent_state_bytes(config, num_layers, layout, 1, kv_dtype_bytes)
+    request_bytes = lambda n: _kv_bytes_per_request(
+        layout, per_layer_token, n, _METAL_BATCHED_TOKENS, state_bytes
+    )
+    kv_budget_bytes = _kv_pool_bytes(
+        layout, per_layer_token, max(0.0, requested_gb - non_kv_gb) * (1024**3)
+    )
+    block_bytes = KV_BLOCK_SIZE * per_layer_token * max(1, layout.full_layers + layout.sliding_layers)
+
+    absolute_cap = derive_max_model_len(config) or 131072
+    fitting_len = _largest_fitting_len(kv_budget_bytes, absolute_cap, 256, request_bytes)
+    max_model_len = fitting_len or 256
+    max_num_seqs = (
+        max(1, min(256, int(kv_budget_bytes // request_bytes(max_model_len)))) if fitting_len else 1
+    )
+    can_fit = fitting_len > 0 and kv_budget_bytes >= _METAL_MIN_BLOCKS * block_bytes
+
+    recommendations = []
+    if not can_fit:
+        recommendations.append(
+            f"Weights+overhead ({non_kv_gb:.2f} GB) leave no room for a KV cache within "
+            f"{gpu_memory_utilization:.2f} x {working_set_gb:.1f} GB (Metal working set)"
+        )
+        if not is_model_quantized(config, model_id):
+            recommendations.append(
+                "Consider a quantized version of the model (e.g. an mlx-community 4-bit build)"
+            )
+        recommendations.append("Try a smaller model variant")
+
+    return {
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "max_model_len": max_model_len,
+        "tensor_parallel_size": 1,
+        "max_num_seqs": max_num_seqs,
+        "estimated_weights_memory_gb": round(weights_memory_gb, 2),
+        "per_gpu_weights_gb": round(weights_memory_gb, 2),
+        "activation_memory_gb": round(activation_gb, 2),
+        "compile_workspace_gb": 0.0,
+        "kv_cache_memory_gb": round(kv_budget_bytes / (1024**3), 2),
+        "metal_working_set_gb": round(working_set_gb, 2),
+        "min_required_memory_gb": round(non_kv_gb, 2),
+        "can_fit": can_fit,
+        "enforce_eager": False,
         "recommendations": recommendations,
         "warnings": warnings,
     }

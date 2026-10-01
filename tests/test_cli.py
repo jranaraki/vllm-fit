@@ -82,3 +82,11 @@ def test_cpu_command_batched_tokens_cover_max_model_len():
 def test_gpu_command_pins_sized_gpus():
     cmd = _format_vllm_command("some/model", _gpu_params(), hardware_type="gpu", gpu_ids=[2, 3])
     assert cmd.startswith("CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2,3 vllm serve ")
+
+
+def test_metal_command_shape():
+    params = {**_gpu_params(), "tensor_parallel_size": 1}
+    cmd = _format_vllm_command("some/model", params, hardware_type="metal", gpu_ids=None)
+    assert cmd.startswith("vllm serve some/model --gpu_memory_utilization 0.9")
+    assert "CUDA_" not in cmd and "VLLM_CPU_KVCACHE_SPACE" not in cmd
+    assert "--max_num_batched_tokens" not in cmd and "--enforce-eager" not in cmd
