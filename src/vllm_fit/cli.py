@@ -8,7 +8,14 @@ from rich.panel import Panel
 
 from .engine_tester import DEFAULT_TIMEOUT, profile_parameters, profile_parameters_cpu
 from .estimator import _CUDA_CONTEXT_GB, estimate_parameters, estimate_parameters_cpu
-from .hardware import get_free_vram_info, get_vram_info, detect_hardware, get_ram_info, is_apple_silicon
+from .hardware import (
+    UnsupportedHardwareError,
+    detect_hardware,
+    get_free_vram_info,
+    get_ram_info,
+    get_vram_info,
+    is_apple_silicon,
+)
 from .params import resolve_weights
 from .registry import get_model_config
 
@@ -106,6 +113,23 @@ def free_vram_for_sizing(vram_info: dict, gpuids: list[int]) -> Optional[float]:
     return ratio * min(vram_info[g] for g in gpuids) + _CUDA_CONTEXT_GB
 
 
+def _detect_hardware(device: str, gpuid: str) -> str:
+    """Resolve the target hardware, exiting with a clear message when it can't be sized."""
+    if device not in ("auto", "gpu", "cpu"):
+        print(f"[red]--device must be 'auto', 'gpu' or 'cpu', not '{device}'[/red]")
+        raise typer.Exit(2)
+    try:
+        hardware_type = detect_hardware(device)
+    except UnsupportedHardwareError as exc:
+        print(f"[red]❌ {exc}[/red]")
+        if device == "auto":
+            print("[dim]Pass --device cpu to size for vLLM's CPU backend instead.[/dim]")
+        raise typer.Exit(1)
+    if hardware_type == "cpu" and gpuid != "all":
+        print(f"[yellow]⚠ --gpuid {gpuid} ignored: sizing for the CPU backend[/yellow]")
+    return hardware_type
+
+
 def _show_no_hardware_error():
     print("[red]❌ No compatible hardware detected[/red]")
     print()
@@ -198,8 +222,11 @@ def recommend(
     gpuid: str = typer.Option(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
+    device: str = typer.Option(
+        "auto", "--device", help="Hardware to size for: 'auto', 'gpu' or 'cpu'"
+    ),
 ) -> None:
-    hardware_type = detect_hardware()
+    hardware_type = _detect_hardware(device, gpuid)
 
     config, config_repo_id = _load_config(model_id)
 
@@ -289,8 +316,11 @@ def profile(
         DEFAULT_TIMEOUT, "--timeout",
         help="Seconds to wait for each vLLM test launch before giving up",
     ),
+    device: str = typer.Option(
+        "auto", "--device", help="Hardware to size for: 'auto', 'gpu' or 'cpu'"
+    ),
 ) -> None:
-    hardware_type = detect_hardware()
+    hardware_type = _detect_hardware(device, gpuid)
 
     config, config_repo_id = _load_config(model_id)
 
@@ -435,11 +465,14 @@ def serve(
         DEFAULT_TIMEOUT, "--timeout",
         help="Seconds to wait for each vLLM test launch before giving up",
     ),
+    device: str = typer.Option(
+        "auto", "--device", help="Hardware to size for: 'auto', 'gpu' or 'cpu'"
+    ),
 ) -> None:
     import os
     import subprocess
 
-    hardware_type = detect_hardware()
+    hardware_type = _detect_hardware(device, gpuid)
 
     config, config_repo_id = _load_config(model_id)
 
