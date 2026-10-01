@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.5.16 (2026-10-01)
+
+### Bug Fixes
+
+- **profile**: Probe with the same engine arguments as the served command
+  ([`0270ad4`](https://github.com/jranaraki/vllm-fit/commit/0270ad4ba9e2bc73949a67d3a5f410a121d03a12))
+
+### Documentation
+
+- Document GPU pinning, CUDA_VISIBLE_DEVICES, local and gated models
+  ([`18ddbcd`](https://github.com/jranaraki/vllm-fit/commit/18ddbcdef0dd40e48f825c000c1944a62eba3456))
+
+- Make the README match current behaviour and state its assumptions
+  ([`64c4934`](https://github.com/jranaraki/vllm-fit/commit/64c4934715b36238f8def332fb4394655044ede6))
+
+
 ## v0.5.15 (2026-10-01)
 
 ### Bug Fixes
