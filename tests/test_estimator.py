@@ -543,3 +543,31 @@ def test_recurrent_state_reduces_concurrency():
                                    total_vram=24.0, weight_info=wi)
     with_state = estimate_parameters(mamba, total_vram=24.0, weight_info=wi)
     assert with_state["max_num_seqs"] < no_state["max_num_seqs"]
+
+
+def test_kv_request_rounds_to_blocks_and_reserves_null_block():
+    from vllm_fit.config_resolver import AttentionLayout
+    from vllm_fit.estimator import (
+        KV_BLOCK_SIZE, _kv_bytes_per_request, _kv_pool_bytes, _largest_fitting_len)
+
+    layout = AttentionLayout(32)
+    per_token = 2 * 8 * 128 * 2  # one layer's K+V bytes per token
+    block = KV_BLOCK_SIZE * per_token * 32
+    # 1000 tokens needs 63 blocks of 16, not 62.5.
+    assert _kv_bytes_per_request(layout, per_token, 1000, 2048) == 63 * block
+    # A pool of exactly 100 blocks leaves 99 for requests (one null block).
+    pool = _kv_pool_bytes(layout, per_token, 100 * block)
+    assert pool == 99 * block
+    best = _largest_fitting_len(pool, 131072, 256,
+                                lambda n: _kv_bytes_per_request(layout, per_token, n, 2048))
+    assert best == 99 * KV_BLOCK_SIZE
+
+
+def test_sliding_request_matches_sliding_window_spec():
+    from vllm_fit.config_resolver import AttentionLayout
+    from vllm_fit.estimator import KV_BLOCK_SIZE, _kv_bytes_per_request
+
+    layout = AttentionLayout(0, 10, 1024)
+    # cdiv(min(window - 1 + batched, len), 16) + 1 blocks per sliding layer.
+    expected_blocks = -(-(1024 - 1 + 2048) // 16) + 1
+    assert _kv_bytes_per_request(layout, 1.0, 131072, 2048) == 10 * expected_blocks * KV_BLOCK_SIZE
