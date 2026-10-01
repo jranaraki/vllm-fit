@@ -19,6 +19,17 @@ def test_dtype_bytes_table():
     assert _st_dtype_bytes("WEIRD") == 2.0
 
 
+def test_serving_bytes_downcasts_float32_only():
+    from vllm_fit.params import _serving_bytes
+
+    assert _serving_bytes("F32") == 2.0
+    assert _serving_bytes("F64") == 2.0
+    assert _serving_bytes("BF16") == 2.0
+    # Packed int4 weights (AWQ/GPTQ qweight) are stored as I32 and stay as-is.
+    assert _serving_bytes("I32") == 4.0
+    assert _serving_bytes("U8") == 1.0
+
+
 def test_weightinfo_gb():
     wi = WeightInfo(source="x", weights_bytes=2 * 1024**3)
     assert abs(wi.weights_gb() - 2.0) < 1e-9
@@ -62,8 +73,8 @@ def test_ladder_prefers_safetensors_metadata(monkeypatch):
         assert wi is not None
         assert wi.source == "safetensors_metadata"
         assert wi.total_params == 7_000_000_000
-        # 6e9 * 2 bytes + 1e9 * 4 bytes = 16e9 bytes
-        assert wi.weights_bytes == 6_000_000_000 * 2 + 1_000_000_000 * 4
+        # F32 tensors are cast to the 16-bit serving dtype: 7e9 * 2 bytes.
+        assert wi.weights_bytes == 7_000_000_000 * 2
         assert wi.per_dtype == {"BF16": 6_000_000_000, "F32": 1_000_000_000}
     finally:
         if saved is not None:
