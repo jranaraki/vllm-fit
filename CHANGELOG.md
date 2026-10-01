@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.12 (2026-10-01)
+
+### Bug Fixes
+
+- **registry**: Support local model directories and explain gated repos
+  ([`cfc5bb7`](https://github.com/jranaraki/vllm-fit/commit/cfc5bb700709dc1bad76975df71288234132d67f))
+
+
 ## v0.5.11 (2026-10-01)
 
 ### Bug Fixes
