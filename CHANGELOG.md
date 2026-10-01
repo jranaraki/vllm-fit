@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.5.6 (2026-10-01)
+
+### Bug Fixes
+
+- **cli**: Print the vllm serve command on one line
+  ([`d9603c3`](https://github.com/jranaraki/vllm-fit/commit/d9603c35eac9c9b26e7f9adf82c550d0d32abc03))
+
+### Build System
+
+- Require huggingface-hub>=0.25 and make `uv run pytest` work
+  ([`44bfae7`](https://github.com/jranaraki/vllm-fit/commit/44bfae73868533e57dd4ee449b66f377133e9fa8))
+
+
 ## v0.5.5 (2026-10-01)
 
 ### Bug Fixes
