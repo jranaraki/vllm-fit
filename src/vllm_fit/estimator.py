@@ -8,8 +8,8 @@ from .config_resolver import (
     get_head_dim,
     derive_max_model_len,
     detect_mla,
-    full_attention_layer_count,
-    sliding_window,
+    AttentionLayout,
+    attention_layout,
     crosscheck_with_transformers,
 )
 
@@ -334,27 +334,60 @@ def _select_tensor_parallel(
     return candidates[-1]
 
 
-def _kv_bytes_per_token(
+def _kv_bytes_per_layer_token(
     config: Dict[str, Any],
-    num_layers: int,
     num_kv_heads: int,
     head_dim: int,
     tensor_parallel_size: int = 1,
     kv_dtype_bytes: int = 2,
 ) -> float:
-    """KV-cache bytes per token, architecture-aware.
+    """KV-cache bytes one attention layer stores per token on one GPU.
 
-    Counts only full-attention layers (hybrid models free the rest), divides KV heads
-    across tensor-parallel ranks (floor 1), and uses the compact MLA latent when present.
+    Divides KV heads across tensor-parallel ranks (floor 1), and uses the compact MLA
+    latent when present (replicated across TP ranks, not sharded; no K/V pair).
     """
-    full_layers = full_attention_layer_count(config, num_layers)
     mla = detect_mla(config)
     if mla:
-        # MLA stores a small latent per token: no x2, no x heads. Replicated across
-        # TP ranks (not sharded), so it doesn't shrink with tensor parallel.
-        return full_layers * (mla["kv_lora_rank"] + mla["qk_rope_head_dim"]) * kv_dtype_bytes
+        return (mla["kv_lora_rank"] + mla["qk_rope_head_dim"]) * kv_dtype_bytes
     kv_heads_per_gpu = max(1, num_kv_heads // tensor_parallel_size)
-    return 2 * full_layers * kv_heads_per_gpu * head_dim * kv_dtype_bytes
+    return 2 * kv_heads_per_gpu * head_dim * kv_dtype_bytes
+
+
+def _kv_bytes_per_request(
+    layout: AttentionLayout, per_layer_token: float, max_model_len: int, batched_tokens: int
+) -> float:
+    """KV memory one request of ``max_model_len`` tokens needs.
+
+    Full layers hold every token. Sliding-window layers hold at most the window plus
+    the tokens scheduled in one step, as in vLLM's SlidingWindowSpec.
+    """
+    sliding_span = max_model_len
+    if layout.sliding_layers and layout.window:
+        sliding_span = min(max_model_len, layout.window + batched_tokens)
+    return per_layer_token * (
+        layout.full_layers * max_model_len + layout.sliding_layers * sliding_span
+    )
+
+
+def _largest_fitting_len(
+    budget_bytes: float,
+    cap: int,
+    floor: int,
+    request_bytes,
+) -> int:
+    """Largest length in [floor, cap] whose single request fits the budget, or 0."""
+    if request_bytes(floor) > budget_bytes:
+        return 0
+    if request_bytes(cap) <= budget_bytes:
+        return cap
+    lo, hi = floor, cap
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if request_bytes(mid) <= budget_bytes:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def _serve_default_batched_tokens(per_gpu_vram_gb: float) -> int:
@@ -401,17 +434,15 @@ def estimate_parameters_cpu(
         hidden_size // num_attention_heads if num_attention_heads else hidden_size
     )
     head_dim = int(head_dim)
-    kv_bytes_per_token = max(1.0, _kv_bytes_per_token(
-        config, num_layers, num_kv_heads, head_dim, tensor_parallel_size
-    ))
-    max_kv_tokens = int(kv_cache_space_gb * (1024**3) / kv_bytes_per_token)
+    layout = attention_layout(config, num_layers)
+    per_layer_token = _kv_bytes_per_layer_token(config, num_kv_heads, head_dim)
+    # CPU commands pin max_num_batched_tokens to max_model_len.
+    request_bytes = lambda n: max(1.0, _kv_bytes_per_request(layout, per_layer_token, n, n))
+    kv_budget_bytes = kv_cache_space_gb * (1024**3)
 
-    derived_cap = derive_max_model_len(config) or PRACTICAL_CPU_LEN_CAP
-    max_model_len = max(256, min(derived_cap, max_kv_tokens or 256, PRACTICAL_CPU_LEN_CAP))
-    if max_kv_tokens > 0:
-        max_num_seqs = max(1, min(MAX_NUM_SEQS_CAP, max_kv_tokens // max_model_len))
-    else:
-        max_num_seqs = 1
+    len_cap = min(derive_max_model_len(config) or PRACTICAL_CPU_LEN_CAP, PRACTICAL_CPU_LEN_CAP)
+    max_model_len = _largest_fitting_len(kv_budget_bytes, len_cap, 256, request_bytes) or 256
+    max_num_seqs = max(1, min(MAX_NUM_SEQS_CAP, int(kv_budget_bytes // request_bytes(max_model_len))))
 
     total_required_gb = weights_memory_gb + activation_buffer_gb + os_headroom_gb + kv_cache_space_gb
 
@@ -555,15 +586,15 @@ def estimate_parameters(
     activation_peak_gb = _activation_peak_gb(hidden_size, intermediate_size, batched_tokens)
     non_torch_gb = 0.5 + (0.7 if tensor_parallel_size > 1 else 0.0)
 
-    # KV cache per token, architecture-aware (independent of enforce_eager).
+    # KV cache, architecture-aware (independent of enforce_eager).
     kv_dtype_bytes = 2  # fp16/bf16 KV (vLLM default); fp8 KV would halve this.
-    kv_bytes_per_token = _kv_bytes_per_token(
-        config, num_layers, num_kv_heads, head_dim, tensor_parallel_size, kv_dtype_bytes
+    layout = attention_layout(config, num_layers)
+    per_layer_token = _kv_bytes_per_layer_token(
+        config, num_kv_heads, head_dim, tensor_parallel_size, kv_dtype_bytes
     )
-    kv_cache_per_token_gb = kv_bytes_per_token / (1024**3)
+    request_bytes = lambda n: _kv_bytes_per_request(layout, per_layer_token, n, batched_tokens)
 
     derived_cap = derive_max_model_len(config)
-    window = sliding_window(config)
     absolute_cap = derived_cap if derived_cap else 131072
 
     def _compute_fit(enforce_eager: bool) -> Dict[str, Any]:
@@ -572,28 +603,22 @@ def estimate_parameters(
         non_kv_per_gpu = per_gpu_weights + activation_peak_gb + non_torch_gb + cudagraph_gb
         usable_for_kv_gb = requested_gb - non_kv_per_gpu
 
-        max_kv_tokens = 0
-        if usable_for_kv_gb > 0 and kv_cache_per_token_gb > 0:
-            max_kv_tokens = int(usable_for_kv_gb / kv_cache_per_token_gb)
+        kv_budget_bytes = max(0.0, usable_for_kv_gb) * (1024**3)
 
-        max_model_len = min(absolute_cap, max_kv_tokens) if max_kv_tokens > 0 else 512
-        kv_span = min(max_model_len, window) if window else max_model_len
-        if not window and max_kv_tokens > 0 and max_model_len > max_kv_tokens:
-            max_model_len = max_kv_tokens
-            kv_span = max_model_len
-        max_model_len = max(256, min(max_model_len, absolute_cap))
-
-        if max_kv_tokens > 0 and kv_span > 0:
-            max_num_seqs = max(1, min(256, max_kv_tokens // kv_span))
+        # Longest context one request can use, then how many such requests fit at once.
+        fitting_len = _largest_fitting_len(kv_budget_bytes, absolute_cap, 256, request_bytes)
+        max_model_len = fitting_len or 256
+        if fitting_len:
+            max_num_seqs = max(1, min(256, int(kv_budget_bytes // request_bytes(max_model_len))))
         else:
             max_num_seqs = 1
 
-        can_fit = not (non_kv_per_gpu >= requested_gb or max_kv_tokens < 256)
+        can_fit = non_kv_per_gpu < requested_gb and fitting_len > 0
         return {
             "enforce_eager": enforce_eager,
             "cudagraph_gb": cudagraph_gb,
             "non_kv_per_gpu": non_kv_per_gpu,
-            "max_kv_tokens": max_kv_tokens,
+            "kv_budget_bytes": kv_budget_bytes,
             "max_model_len": max_model_len,
             "max_num_seqs": max_num_seqs,
             "can_fit": can_fit,
@@ -610,7 +635,7 @@ def estimate_parameters(
     eager_lever_applied = False
     if not weights_dont_fit and not fit["can_fit"] and not fit["enforce_eager"]:
         eager_fit = _compute_fit(True)
-        if eager_fit["can_fit"] or eager_fit["max_kv_tokens"] > fit["max_kv_tokens"]:
+        if eager_fit["can_fit"] or eager_fit["kv_budget_bytes"] > fit["kv_budget_bytes"]:
             fit = eager_fit
             eager_lever_applied = True
 

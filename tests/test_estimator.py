@@ -451,3 +451,34 @@ def test_activation_sized_for_vllm_serve_default_batch():
     small = estimate_parameters(cfg, total_vram=48.0 * 4, num_gpus=4)
     big = estimate_parameters(cfg, total_vram=79.6 * 4, num_gpus=4)
     assert big["activation_memory_gb"] > small["activation_memory_gb"] * 3
+
+
+def _gpt_oss_like():
+    return {"hidden_size": 2880, "num_hidden_layers": 24, "num_attention_heads": 64,
+            "num_key_value_heads": 8, "head_dim": 64, "vocab_size": 201088,
+            "intermediate_size": 2880, "max_position_embeddings": 131072,
+            "sliding_window": 128,
+            "layer_types": ["sliding_attention", "full_attention"] * 12}
+
+
+def test_sliding_layers_do_not_inflate_concurrency():
+    # Full-attention layers still hold every token, so concurrency at full context is
+    # bounded by them, not by the 128-token window.
+    wi = WeightInfo(source="test", weights_bytes=int(12.8 * 1024**3))
+    res = estimate_parameters(_gpt_oss_like(), total_vram=80.0, weight_info=wi)
+    full_layer_bytes = 12 * 2 * 8 * 64 * 2 * res["max_model_len"]
+    budget = (res["gpu_memory_utilization"] * 80.0 - 12.8) * 1024**3
+    assert res["max_num_seqs"] <= budget / full_layer_bytes
+
+
+def test_sliding_layers_cost_less_than_full():
+    wi = WeightInfo(source="test", weights_bytes=int(50 * 1024**3))
+    cfg = {"model_type": "gemma3_text", "hidden_size": 5376, "num_hidden_layers": 62,
+           "num_attention_heads": 32, "num_key_value_heads": 16, "head_dim": 128,
+           "vocab_size": 262208, "intermediate_size": 21504,
+           "max_position_embeddings": 131072, "sliding_window": 1024,
+           "sliding_window_pattern": 6}
+    hybrid = estimate_parameters(cfg, total_vram=80.0, weight_info=wi)
+    all_full = estimate_parameters({**cfg, "sliding_window": None}, total_vram=80.0,
+                                   weight_info=wi)
+    assert hybrid["max_model_len"] > 3 * all_full["max_model_len"]

@@ -173,3 +173,52 @@ def test_sliding_window():
     assert sliding_window({"sliding_window": 4096}) == 4096
     assert sliding_window({"sliding_window": 4096, "use_sliding_window": False}) is None
     assert sliding_window({}) is None
+
+
+# --- attention_layout ----------------------------------------------------
+
+from vllm_fit.config_resolver import AttentionLayout, attention_layout  # noqa: E402
+
+
+def test_layout_gemma3_sliding_window_pattern():
+    # google/gemma-3-27b-it: 62 layers, every 6th global, local window 1024.
+    cfg = {"model_type": "gemma3",
+           "text_config": {"model_type": "gemma3_text", "hidden_size": 5376,
+                           "num_hidden_layers": 62, "num_attention_heads": 32,
+                           "sliding_window": 1024, "sliding_window_pattern": 6}}
+    assert attention_layout(cfg, 62) == AttentionLayout(10, 52, 1024)
+
+
+def test_layout_gemma2_alternates():
+    cfg = {"model_type": "gemma2", "num_hidden_layers": 42, "sliding_window": 4096}
+    assert attention_layout(cfg, 42) == AttentionLayout(21, 21, 4096)
+
+
+def test_layout_gpt_oss_layer_types():
+    cfg = {"sliding_window": 128,
+           "layer_types": ["sliding_attention", "full_attention"] * 12}
+    assert attention_layout(cfg, 24) == AttentionLayout(12, 12, 128)
+
+
+def test_layout_nemotron_h_hybrid_pattern():
+    # nvidia/NVIDIA-Nemotron-Nano-9B-v2: 56 layers, 4 attention.
+    pattern = "M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-M-MM-M-M-M-M-M-"
+    cfg = {"num_hidden_layers": len(pattern), "hybrid_override_pattern": pattern}
+    assert attention_layout(cfg, len(pattern)) == AttentionLayout(4)
+
+
+def test_layout_chunked_local_attention():
+    cfg = {"attention_chunk_size": 8192,
+           "layer_types": ["chunked_attention"] * 3 + ["full_attention"]}
+    assert attention_layout(cfg, 4) == AttentionLayout(1, 3, 8192)
+
+
+def test_layout_uniform_sliding_window():
+    # mistralai/Mistral-7B-v0.1: every layer windowed at 4096.
+    assert attention_layout({"sliding_window": 4096}, 32) == AttentionLayout(0, 32, 4096)
+
+
+def test_layout_disabled_sliding_window_is_full():
+    # Qwen2.5 configs carry sliding_window but set use_sliding_window: false.
+    cfg = {"sliding_window": 131072, "use_sliding_window": False}
+    assert attention_layout(cfg, 28) == AttentionLayout(28)
