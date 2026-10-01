@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-10-01)
+
+### Continuous Integration
+
+- Test on Python 3.12 and 3.13
+  ([`e6ffacc`](https://github.com/jranaraki/vllm-fit/commit/e6ffacc667c6a3fe6b3fc7a5e4d9bbcedaf1e0da))
+
+### Features
+
+- Size for the Apple GPU when vllm-metal is installed
+  ([`9857fc9`](https://github.com/jranaraki/vllm-fit/commit/9857fc95fc2b6f55d380656ee24c2bab3580ee1c))
+
+### Testing
+
+- Add ground-truth fixtures and a harness for real vLLM runs
+  ([`bd19451`](https://github.com/jranaraki/vllm-fit/commit/bd19451906af813b346adf3e16818cca73435e27))
+
+
 ## v0.5.18 (2026-10-01)
 
 ### Bug Fixes
