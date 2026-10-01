@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.6.1 (2026-10-01)
+
+### Bug Fixes
+
+- **profile**: Cap the length search at the model's maximum context
+  ([`74b2c44`](https://github.com/jranaraki/vllm-fit/commit/74b2c44e9b2377f6a9eb5d81da9304cc4b764f7f))
+
+
 ## v0.6.0 (2026-10-01)
 
 ### Continuous Integration
