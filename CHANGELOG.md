@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.2 (2026-10-01)
+
+### Bug Fixes
+
+- **estimator**: Size GGUF models by quant bits-per-weight
+  ([`6507308`](https://github.com/jranaraki/vllm-fit/commit/6507308f7463df6faaba4ef906dab122b920bd20))
+
+
 ## v0.5.1 (2026-10-01)
 
 ### Bug Fixes
