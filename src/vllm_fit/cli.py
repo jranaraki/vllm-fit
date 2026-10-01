@@ -6,6 +6,7 @@ from rich import print
 from rich.console import Console
 from rich.panel import Panel
 
+from .config_resolver import derive_max_model_len
 from .engine_tester import DEFAULT_TIMEOUT, profile_parameters, profile_parameters_cpu
 from .estimator import (
     _CUDA_CONTEXT_GB,
@@ -393,6 +394,7 @@ def profile(
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
             config_repo_id=config_repo_id,
+            max_len_cap=derive_max_model_len(config),
         )
 
         elapsed_time = time.time() - start_time
@@ -471,6 +473,7 @@ def profile(
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
             config_repo_id=config_repo_id,
+            max_len_cap=derive_max_model_len(config),
         )
 
         elapsed_time = time.time() - start_time
@@ -553,6 +556,7 @@ def serve(
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
             config_repo_id=config_repo_id,
+            max_len_cap=derive_max_model_len(config),
         )
         kv_space = params.get("kv_cache_space_gb")
         if kv_space:
@@ -596,6 +600,7 @@ def serve(
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
             config_repo_id=config_repo_id,
+            max_len_cap=derive_max_model_len(config),
         )
         if hardware_type == "gpu":
             env.update(gpu_launch_env(gpuids))
