@@ -131,9 +131,14 @@ def _build_vllm_args(
 
     args += ["--max_model_len", str(params["max_model_len"])]
     args += ["--max_num_seqs", str(params["max_num_seqs"])]
-    # The estimator sizes activation headroom for a 2048-token prefill batch; pin
-    # vLLM to the same bound so the served config matches what we reserved for.
-    args += ["--max_num_batched_tokens", "2048"]
+    # GPU: leave max_num_batched_tokens to vLLM. Its default is what the estimator sized
+    # activation memory for, and vLLM raises it itself for models that can't chunk
+    # prefill (pinning a value below max_model_len breaks those at startup).
+    # CPU: some vLLM CPU builds disable chunked prefill, which requires
+    # max_num_batched_tokens >= max_model_len; pinning it to max_model_len is valid
+    # either way.
+    if hardware_type == "cpu":
+        args += ["--max_num_batched_tokens", str(params["max_model_len"])]
 
     if config_repo_id and config_repo_id != model_id.split(":")[0]:
         args += ["--hf-config-path", config_repo_id]

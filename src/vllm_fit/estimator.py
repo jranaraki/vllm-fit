@@ -357,6 +357,17 @@ def _kv_bytes_per_token(
     return 2 * full_layers * kv_heads_per_gpu * head_dim * kv_dtype_bytes
 
 
+def _serve_default_batched_tokens(per_gpu_vram_gb: float) -> int:
+    """``max_num_batched_tokens`` that ``vllm serve`` picks when it isn't set
+    (EngineArgs.get_batch_defaults, OpenAI server context). A100-80GB actually
+    keeps 2048; without the device name we assume the larger, safer value."""
+    if per_gpu_vram_gb >= 160:
+        return 16384
+    if per_gpu_vram_gb >= 70:
+        return 8192
+    return 2048
+
+
 def estimate_parameters_cpu(
     config: Dict[str, Any], total_ram: float, model_id: str = "", weight_info: Any = None
 ) -> Dict[str, Any]:
@@ -538,7 +549,10 @@ def estimate_parameters(
     requested_gb = gpu_memory_utilization * per_gpu_vram
 
     # These don't depend on the CUDA-graph lever.
-    activation_peak_gb = _activation_peak_gb(hidden_size, intermediate_size)
+    # The flag is left to vLLM's default (it raises the value itself for models that
+    # can't chunk prefill), so size activation for that default.
+    batched_tokens = _serve_default_batched_tokens(per_gpu_vram)
+    activation_peak_gb = _activation_peak_gb(hidden_size, intermediate_size, batched_tokens)
     non_torch_gb = 0.5 + (0.7 if tensor_parallel_size > 1 else 0.0)
 
     # KV cache per token, architecture-aware (independent of enforce_eager).

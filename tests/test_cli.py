@@ -65,3 +65,15 @@ def test_profiling_failure_exits_nonzero():
     with pytest.raises(typer.Exit) as exc:
         _report_profiling_failure({"profiling_success": False, "interrupted": True})
     assert exc.value.exit_code == 130
+
+
+def test_gpu_command_leaves_batched_tokens_to_vllm():
+    # Pinning 2048 below max_model_len breaks models without chunked prefill.
+    args = _build_vllm_args("some/model", _gpu_params(), hardware_type="gpu")
+    assert "--max_num_batched_tokens" not in args
+
+
+def test_cpu_command_batched_tokens_cover_max_model_len():
+    args = _build_vllm_args("some/model", _cpu_params(), hardware_type="cpu")
+    i = args.index("--max_num_batched_tokens")
+    assert int(args[i + 1]) >= _cpu_params()["max_model_len"]
