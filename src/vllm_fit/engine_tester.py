@@ -148,6 +148,14 @@ def _run_probe(env: dict, llm_kwargs: dict, timeout: int) -> bool:
             pass
 
 
+def _config_override_kwargs(model_id: str, config_repo_id: Optional[str]) -> dict:
+    """The same --hf-config-path / --tokenizer the served command gets (GGUF repos
+    without their own config.json borrow the base model's)."""
+    if config_repo_id and config_repo_id != model_id.split(":")[0]:
+        return {"hf_config_path": config_repo_id, "tokenizer": config_repo_id}
+    return {}
+
+
 def _test_configuration_cpu(
     model_id: str,
     max_model_len: int,
@@ -155,6 +163,7 @@ def _test_configuration_cpu(
     enforce_eager: bool,
     timeout: int = DEFAULT_TIMEOUT,
     kv_cache_space_gb: Optional[int] = None,
+    config_repo_id: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     env = {"OMP_NUM_THREADS": str(os.cpu_count() or 4)}
     # Size the CPU KV cache to match what we recommend, so the probe is representative.
@@ -167,6 +176,9 @@ def _test_configuration_cpu(
             max_model_len=max_model_len,
             max_num_seqs=max_num_seqs,
             enforce_eager=enforce_eager,
+            # Matches the served CPU command (valid with or without chunked prefill).
+            max_num_batched_tokens=max_model_len,
+            **_config_override_kwargs(model_id, config_repo_id),
         ),
         timeout,
     )
@@ -182,6 +194,7 @@ def _test_configuration(
     enforce_eager: bool,
     gpu_ids: List[int],
     timeout: int = DEFAULT_TIMEOUT,
+    config_repo_id: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     env = {
         "NCCL_DEBUG": "WARN",
@@ -200,6 +213,7 @@ def _test_configuration(
             tensor_parallel_size=tensor_parallel_size,
             max_num_seqs=max_num_seqs,
             enforce_eager=enforce_eager,
+            **_config_override_kwargs(model_id, config_repo_id),
         ),
         timeout,
     )
@@ -241,6 +255,7 @@ def _binary_search_max_num_seqs(
             enforce_eager,
             gpu_ids,
             timeout=fixed_params.get("timeout", DEFAULT_TIMEOUT),
+            config_repo_id=fixed_params.get("config_repo_id"),
         )
 
         if success and not timeout:
@@ -287,6 +302,7 @@ def _binary_search_max_model_len(
             enforce_eager,
             gpu_ids,
             timeout=fixed_params.get("timeout", DEFAULT_TIMEOUT),
+            config_repo_id=fixed_params.get("config_repo_id"),
         )
 
         if success and not timeout:
@@ -303,6 +319,7 @@ def profile_parameters(
     initial_params: dict,
     progress_callback: Optional[Callable[[str], None]] = None,
     timeout: int = DEFAULT_TIMEOUT,
+    config_repo_id: Optional[str] = None,
 ) -> dict:
     probe_timeout = timeout
     gpu_ids = initial_params.get("gpu_ids", [0])
@@ -338,6 +355,7 @@ def profile_parameters(
             enforce_eager,
             gpu_ids,
             timeout=probe_timeout,
+            config_repo_id=config_repo_id,
         )
 
         if not success:
@@ -358,6 +376,7 @@ def profile_parameters(
                 enforce_eager,
                 gpu_ids,
                 timeout=probe_timeout,
+                config_repo_id=config_repo_id,
             )
 
         if not success:
@@ -406,6 +425,7 @@ def profile_parameters(
                     enforce_eager,
                     gpu_ids,
                     timeout=probe_timeout,
+                    config_repo_id=config_repo_id,
                 )
 
         if not success:
@@ -435,6 +455,7 @@ def profile_parameters(
             "max_num_seqs": max_num_seqs,
             "enforce_eager": enforce_eager,
             "timeout": probe_timeout,
+            "config_repo_id": config_repo_id,
         }
 
         max_num_seqs = _binary_search_max_num_seqs(
@@ -495,6 +516,7 @@ def profile_parameters_cpu(
     initial_params: dict,
     progress_callback: Optional[Callable[[str], None]] = None,
     timeout: int = DEFAULT_TIMEOUT,
+    config_repo_id: Optional[str] = None,
 ) -> dict:
     probe_timeout = timeout
     max_model_len = initial_params["max_model_len"]
@@ -522,6 +544,7 @@ def profile_parameters_cpu(
             enforce_eager,
             kv_cache_space_gb=kv_cache_space_gb,
             timeout=probe_timeout,
+            config_repo_id=config_repo_id,
         )
 
         if not success and not enforce_eager:
@@ -540,6 +563,7 @@ def profile_parameters_cpu(
                 enforce_eager,
                 kv_cache_space_gb=kv_cache_space_gb,
                 timeout=probe_timeout,
+                config_repo_id=config_repo_id,
             )
 
         if not success:
@@ -572,6 +596,7 @@ def profile_parameters_cpu(
                     enforce_eager,
                     kv_cache_space_gb=kv_cache_space_gb,
                     timeout=probe_timeout,
+                    config_repo_id=config_repo_id,
                 )
 
         if not success:
@@ -615,6 +640,7 @@ def profile_parameters_cpu(
                 enforce_eager,
                 kv_cache_space_gb=kv_cache_space_gb,
                 timeout=probe_timeout,
+                config_repo_id=config_repo_id,
             )
 
             if success and not timeout:
