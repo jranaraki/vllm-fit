@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.15 (2026-10-01)
+
+### Bug Fixes
+
+- **estimator**: Don't warn about other processes on an idle GPU
+  ([`6a76e13`](https://github.com/jranaraki/vllm-fit/commit/6a76e132e9cc62efe6f684edd6f1408489c08be8))
+
+
 ## v0.5.14 (2026-10-01)
 
 ### Bug Fixes
