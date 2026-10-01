@@ -174,6 +174,32 @@ def test_weight_info_overrides_analytic():
     assert not any("analytic" in w for w in res["warnings"])
 
 
+def test_gguf_ignores_base_repo_bf16_bytes():
+    # Qwen2.5-7B-Instruct-GGUF has no config.json, so weights resolve against the BF16
+    # base repo. The quant tag must decide the size, not the base checkpoint's bytes.
+    cfg = {"hidden_size": 3584, "num_hidden_layers": 28, "num_attention_heads": 28,
+           "num_key_value_heads": 4, "vocab_size": 152064, "intermediate_size": 18944}
+    params = 7_615_616_512
+    wi = WeightInfo(source="safetensors_metadata", total_params=params,
+                    weights_bytes=params * 2, per_dtype={"BF16": params})
+    res = estimate_parameters(cfg, total_vram=24.0,
+                              model_id="Qwen/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
+                              weight_info=wi)
+    expected = params * 4.89 / 8 / 1024**3
+    assert abs(res["estimated_weights_memory_gb"] - round(expected, 2)) < 0.02
+    assert res["estimated_weights_memory_gb"] < 5.0  # not the ~14.2 GB BF16 size
+
+
+def test_gguf_without_quant_tag_keeps_exact_bytes():
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+           "vocab_size": 32000}
+    wi = WeightInfo(source="safetensors_metadata", total_params=1_000_000_000,
+                    weights_bytes=int(1.5 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=24.0, model_id="org/model-GGUF",
+                              weight_info=wi)
+    assert res["estimated_weights_memory_gb"] == 1.5
+
+
 def test_tp_respects_head_divisibility():
     cfg = {"hidden_size": 8192, "num_hidden_layers": 80, "num_attention_heads": 32,
            "vocab_size": 128000, "intermediate_size": 28672}
