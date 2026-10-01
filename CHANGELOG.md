@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.6.2 (2026-10-01)
+
+### Bug Fixes
+
+- **profile**: Measure max_num_seqs from vLLM's own log instead of searching
+  ([`0ab2cbf`](https://github.com/jranaraki/vllm-fit/commit/0f1f8d6a5c145c611277b242f269751128baf364))
+
+
 ## v0.6.1 (2026-10-01)
 
 ### Bug Fixes
