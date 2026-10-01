@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.3 (2026-10-01)
+
+### Bug Fixes
+
+- **cli**: Size multi-GPU setups against the smallest card
+  ([`84973a2`](https://github.com/jranaraki/vllm-fit/commit/84973a21f8b5eae03d569f4474027ede1ab87752))
+
+
 ## v0.5.2 (2026-10-01)
 
 ### Bug Fixes
