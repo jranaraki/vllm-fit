@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.17 (2026-10-01)
+
+### Bug Fixes
+
+- **estimator**: Count Mamba / linear-attention state per request
+  ([`b4e7c60`](https://github.com/jranaraki/vllm-fit/commit/b4e7c6099010abb5d45bc1b06d9d45b4ba6b9575))
+
+
 ## v0.5.16 (2026-10-01)
 
 ### Bug Fixes
