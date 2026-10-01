@@ -86,3 +86,16 @@ def test_cpu_search_never_lowers_a_working_length(monkeypatch):
     res = et.profile_parameters_cpu("org/model", _cpu_initial(3000))
     assert res["profiling_success"] is True
     assert res["max_model_len"] == 3500
+
+
+def test_gpu_probe_pins_devices_in_pci_order(monkeypatch):
+    seen = {}
+
+    def fake_probe(env, llm_kwargs, timeout):
+        seen.update(env)
+        return True
+
+    monkeypatch.setattr(et, "_run_probe", fake_probe)
+    et._test_configuration("org/model", 0.9, 4096, 2, 4, False, [2, 3])
+    assert seen["CUDA_VISIBLE_DEVICES"] == "2,3"
+    assert seen["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"

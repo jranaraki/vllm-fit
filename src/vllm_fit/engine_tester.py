@@ -8,6 +8,8 @@ import tempfile
 import traceback
 from typing import Optional, Callable, List, Tuple
 
+from .hardware import gpu_launch_env
+
 
 # Default per-launch timeout. A launch includes weight loading and, on GPU, torch.compile
 # and CUDA-graph capture, so large models need minutes even when already downloaded.
@@ -188,7 +190,7 @@ def _test_configuration(
         "TORCH_CPP_LOG_LEVEL": "ERROR",
     }
     if gpu_ids:
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+        env.update(gpu_launch_env(gpu_ids))
     started = _run_probe(
         env,
         dict(

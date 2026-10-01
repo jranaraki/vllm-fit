@@ -123,3 +123,32 @@ def test_vram_total_and_free_from_nvml(monkeypatch):
     monkeypatch.setattr(hardware, "pynvml", _FakeNvml([_FakeMem(24, 22.5), _FakeMem(80, 60)]))
     assert hardware.get_vram_info() == {0: 24.0, 1: 80.0}
     assert hardware.get_free_vram_info() == {0: 22.5, 1: 60.0}
+
+
+def test_visible_gpu_indices_parsing():
+    from vllm_fit.hardware import visible_gpu_indices
+
+    idx = [0, 1, 2, 3]
+    uuids = {0: "GPU-aaaa-1", 1: "GPU-bbbb-2", 2: "GPU-cccc-3", 3: "GPU-dddd-4"}
+    assert visible_gpu_indices(None, idx, uuids) is None
+    assert visible_gpu_indices("2,3", idx, uuids) == [2, 3]
+    assert visible_gpu_indices("1,9,0", idx, uuids) == [1]  # stops at the invalid entry
+    assert visible_gpu_indices("GPU-cccc,GPU-aaaa-1", idx, uuids) == [2, 0]
+    assert visible_gpu_indices("", idx, uuids) == []
+    assert visible_gpu_indices("-1", idx, uuids) == []
+    assert visible_gpu_indices("MIG-1234", idx, uuids) is None
+
+
+def test_query_respects_cuda_visible_devices(monkeypatch):
+    fake = _FakeNvml([_FakeMem(24, 23), _FakeMem(24, 23), _FakeMem(80, 79), _FakeMem(80, 79)])
+    monkeypatch.setattr(hardware, "pynvml", fake)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    assert hardware.get_vram_info() == {2: 80.0, 3: 80.0}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    vram, err = hardware._query_gpu_memory()
+    assert vram == {} and "hides every GPU" in err
+
+
+def test_gpu_launch_env_pins_pci_order():
+    assert hardware.gpu_launch_env([2, 3]) == {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "2,3"}
