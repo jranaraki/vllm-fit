@@ -3,7 +3,7 @@ import os
 import platform
 import shutil
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 try:
@@ -38,11 +38,17 @@ def _query_gpu_memory() -> Tuple[Dict[int, Tuple[float, float]], Optional[str]]:
         pynvml.nvmlInit()
     except Exception as exc:
         return mem, f"{type(exc).__name__}: {exc}"
+    uuids: Dict[int, str] = {}
     try:
         for i in range(pynvml.nvmlDeviceGetCount()):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             mem[i] = (mem_info.total / 1024**3, mem_info.free / 1024**3)
+            try:
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+                uuids[i] = uuid.decode() if isinstance(uuid, bytes) else str(uuid)
+            except Exception:
+                pass
     except Exception as exc:
         return {}, f"{type(exc).__name__}: {exc}"
     finally:
@@ -51,7 +57,57 @@ def _query_gpu_memory() -> Tuple[Dict[int, Tuple[float, float]], Optional[str]]:
         except Exception:
             pass
 
+    visible = visible_gpu_indices(os.environ.get("CUDA_VISIBLE_DEVICES"), list(mem), uuids)
+    if visible is not None:
+        mem = {i: mem[i] for i in visible}
+        if not mem:
+            return mem, (
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r} hides every GPU"
+            )
     return mem, None
+
+
+def visible_gpu_indices(
+    value: Optional[str], indices: List[int], uuids: Dict[int, str]
+) -> Optional[List[int]]:
+    """NVML (PCI bus order) indices allowed by a ``CUDA_VISIBLE_DEVICES`` value.
+
+    Accepts integer indices and ``GPU-<uuid>`` (or a unique prefix); like CUDA, parsing
+    stops at the first entry that doesn't match a device. Integer indices are taken in
+    PCI bus order, which is what launched processes get via ``CUDA_DEVICE_ORDER``.
+    Returns None when unset, or when it names MIG devices (not mapped here).
+    """
+    if value is None:
+        return None
+    tokens = [t.strip() for t in value.split(",")] if value.strip() else []
+    if any(t.upper().startswith("MIG-") for t in tokens):
+        return None
+    selected: List[int] = []
+    for token in tokens:
+        match: Optional[int] = None
+        if token.lstrip("-").isdigit():
+            idx = int(token)
+            match = idx if idx in indices else None
+        elif token.upper().startswith("GPU-"):
+            hits = [i for i, u in uuids.items() if u.upper().startswith(token.upper())]
+            match = hits[0] if len(hits) == 1 else None
+        if match is None:
+            break
+        if match not in selected:
+            selected.append(match)
+    return selected
+
+
+def gpu_launch_env(gpu_ids: List[int]) -> Dict[str, str]:
+    """Environment that pins a vLLM process to the given NVML GPU indices.
+
+    NVML numbers GPUs in PCI bus order, while CUDA defaults to fastest-first; setting
+    CUDA_DEVICE_ORDER makes the two agree so the sized GPUs are the ones used.
+    """
+    return {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "CUDA_VISIBLE_DEVICES": ",".join(map(str, gpu_ids)),
+    }
 
 
 def get_vram_info() -> Dict[int, float]:

@@ -77,3 +77,8 @@ def test_cpu_command_batched_tokens_cover_max_model_len():
     args = _build_vllm_args("some/model", _cpu_params(), hardware_type="cpu")
     i = args.index("--max_num_batched_tokens")
     assert int(args[i + 1]) >= _cpu_params()["max_model_len"]
+
+
+def test_gpu_command_pins_sized_gpus():
+    cmd = _format_vllm_command("some/model", _gpu_params(), hardware_type="gpu", gpu_ids=[2, 3])
+    assert cmd.startswith("CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2,3 vllm serve ")

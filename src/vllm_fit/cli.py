@@ -14,6 +14,7 @@ from .hardware import (
     get_free_vram_info,
     get_ram_info,
     get_vram_info,
+    gpu_launch_env,
     is_apple_silicon,
 )
 from .params import resolve_weights
@@ -180,6 +181,7 @@ def _format_vllm_command(
     enforce_eager: bool = False,
     config_repo_id: Optional[str] = None,
     hardware_type: str = "gpu",
+    gpu_ids: Optional[List[int]] = None,
 ) -> str:
     args = _build_vllm_args(
         model_id, params, enforce_eager, config_repo_id, hardware_type
@@ -189,6 +191,11 @@ def _format_vllm_command(
     kv_space = params.get("kv_cache_space_gb")
     if hardware_type == "cpu" and kv_space:
         return f"VLLM_CPU_KVCACHE_SPACE={kv_space} " + " ".join(args)
+    if hardware_type == "gpu" and gpu_ids:
+        # Pin the GPUs that were sized, so running the command elsewhere in the shell
+        # doesn't land on cuda:0 or on GPUs outside the user's allocation.
+        prefix = " ".join(f"{k}={v}" for k, v in gpu_launch_env(gpu_ids).items())
+        return f"{prefix} " + " ".join(args)
     return " ".join(args)
 
 
@@ -302,7 +309,7 @@ def recommend(
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
     _print_command(
-        _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)
+        _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type, gpuids if hardware_type == 'gpu' else None)
     )
 
 
@@ -379,7 +386,7 @@ def profile(
         print()
         print("[bold cyan]Run this command:[/bold cyan]")
         _print_command(
-            _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)
+            _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type, gpuids if hardware_type == 'gpu' else None)
         )
     else:
         vram_info = get_vram_info()
@@ -451,7 +458,7 @@ def profile(
         print()
         print("[bold cyan]Run this command:[/bold cyan]")
         _print_command(
-            _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)
+            _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type, gpuids if hardware_type == 'gpu' else None)
         )
 
 
@@ -532,7 +539,7 @@ def serve(
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
         )
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpuids))
+        env.update(gpu_launch_env(gpuids))
 
     if not params.get("profiling_success", False):
         print()
