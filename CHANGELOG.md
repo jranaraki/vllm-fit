@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.14 (2026-10-01)
+
+### Bug Fixes
+
+- **params**: Don't count multi-token-prediction weights vLLM skips
+  ([`0778222`](https://github.com/jranaraki/vllm-fit/commit/07782224f456fc2bd08e2527f383afb5d340297c))
+
+
 ## v0.5.13 (2026-10-01)
 
 ### Bug Fixes
