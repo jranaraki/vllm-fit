@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.13 (2026-10-01)
+
+### Bug Fixes
+
+- **config**: Derive max_model_len the way current vLLM does
+  ([`e8ea31b`](https://github.com/jranaraki/vllm-fit/commit/e8ea31b897af5316bc14811bae2082b43cddbfc0))
+
+
 ## v0.5.12 (2026-10-01)
 
 ### Bug Fixes
