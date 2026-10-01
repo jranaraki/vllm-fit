@@ -468,6 +468,39 @@ def _largest_fitting_len(
     return lo
 
 
+def _non_torch_gb(tensor_parallel_size: int) -> float:
+    """CUDA context, NCCL buffers and other memory PyTorch's allocator doesn't track."""
+    return 0.5 + (0.7 if tensor_parallel_size > 1 else 0.0)
+
+
+def _cudagraph_gb(per_gpu_weights_gb: float) -> float:
+    """torch.compile / CUDA-graph capture memory (zero with --enforce-eager)."""
+    return min(3.0, max(0.5, per_gpu_weights_gb * 0.1))
+
+
+def kv_cache_memory_gb(
+    config: Dict[str, Any],
+    weights_gb: float,
+    gpu_total_gb: float,
+    gpu_memory_utilization: float,
+    tensor_parallel_size: int = 1,
+    enforce_eager: bool = False,
+) -> float:
+    """Predicted per-GPU memory left for the KV cache at the given settings: the figure
+    vLLM logs as "Available KV cache memory"."""
+    tc = resolve_text_config(config)
+    hidden = int(get_field(tc, "hidden_size", 4096))
+    inter = int(get_field(tc, "intermediate_size", hidden * 4))
+    per_gpu_weights = weights_gb / tensor_parallel_size
+    non_kv = (
+        per_gpu_weights
+        + _activation_peak_gb(hidden, inter, _serve_default_batched_tokens(gpu_total_gb))
+        + _non_torch_gb(tensor_parallel_size)
+        + (0.0 if enforce_eager else _cudagraph_gb(per_gpu_weights))
+    )
+    return gpu_memory_utilization * gpu_total_gb - non_kv
+
+
 def _serve_default_batched_tokens(per_gpu_vram_gb: float) -> int:
     """``max_num_batched_tokens`` that ``vllm serve`` picks when it isn't set
     (EngineArgs.get_batch_defaults, OpenAI server context). A100-80GB actually
@@ -669,7 +702,7 @@ def estimate_parameters(
     # can't chunk prefill), so size activation for that default.
     batched_tokens = _serve_default_batched_tokens(per_gpu_vram)
     activation_peak_gb = _activation_peak_gb(hidden_size, intermediate_size, batched_tokens)
-    non_torch_gb = 0.5 + (0.7 if tensor_parallel_size > 1 else 0.0)
+    non_torch_gb = _non_torch_gb(tensor_parallel_size)
 
     # KV cache, architecture-aware (independent of enforce_eager).
     kv_dtype_bytes = 2  # fp16/bf16 KV (vLLM default); fp8 KV would halve this.
@@ -689,7 +722,7 @@ def estimate_parameters(
 
     def _compute_fit(enforce_eager: bool) -> Dict[str, Any]:
         # torch.compile / CUDA-graph capture; enforce_eager zeroes it (the tight-VRAM lever).
-        cudagraph_gb = 0.0 if enforce_eager else min(3.0, max(0.5, per_gpu_weights * 0.1))
+        cudagraph_gb = 0.0 if enforce_eager else _cudagraph_gb(per_gpu_weights)
         non_kv_per_gpu = per_gpu_weights + activation_peak_gb + non_torch_gb + cudagraph_gb
         usable_for_kv_gb = requested_gb - non_kv_per_gpu
 
