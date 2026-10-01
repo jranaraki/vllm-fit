@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.18 (2026-10-01)
+
+### Bug Fixes
+
+- **estimator**: Size KV in 16-token blocks and reserve vLLM's null block
+  ([`12fe567`](https://github.com/jranaraki/vllm-fit/commit/12fe567bf8631cb9f2f76f600e7bc25994e99fed))
+
+
 ## v0.5.17 (2026-10-01)
 
 ### Bug Fixes
