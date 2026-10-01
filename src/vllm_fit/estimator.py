@@ -448,9 +448,12 @@ def _weights_gb(
     warnings: list,
 ) -> float:
     """Exact weight footprint from metadata when available, else analytic estimate."""
+    # GGUF files aren't safetensors, so any exact byte count came from the unquantized
+    # base repo. Keep its parameter count but cost it at the quant tag's bits-per-weight.
+    gguf_quantized = is_gguf_model(model_id) and _gguf_bpw_from_id(model_id) is not None
     if weight_info is not None:
         wgb = weight_info.weights_gb() if hasattr(weight_info, "weights_gb") else None
-        if wgb is not None:
+        if wgb is not None and not gguf_quantized:
             return wgb
         total_params = getattr(weight_info, "total_params", None)
         if total_params:
