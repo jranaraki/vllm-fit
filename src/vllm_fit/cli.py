@@ -74,6 +74,24 @@ def parse_gpu_ids(gpuid: str, vram_info: dict) -> list[int]:
         return []
 
 
+def sizing_vram(vram_info: dict, gpuids: list[int]) -> float:
+    """Total VRAM to size against: smallest selected GPU x count.
+
+    vLLM applies gpu_memory_utilization to each device's own memory and shards
+    evenly under tensor parallelism, so the smallest card bounds every shard.
+    """
+    return min(vram_info[gid] for gid in gpuids) * len(gpuids)
+
+
+def _print_mixed_gpu_warning(vram_info: dict, gpuids: list[int]) -> None:
+    sizes = [vram_info[gid] for gid in gpuids]
+    if max(sizes) - min(sizes) > 0.5:
+        print(
+            f"[yellow]⚠ Mixed GPU sizes ({', '.join(f'{s:.1f}' for s in sizes)} GB); "
+            f"sizing every GPU as {min(sizes):.1f} GB[/yellow]"
+        )
+
+
 def _show_no_hardware_error():
     print("[red]❌ No compatible hardware detected[/red]")
     print()
@@ -164,13 +182,15 @@ def recommend(
         total_vram = sum(vram_info[gid] for gid in gpuids)
         num_gpus = len(gpuids)
         params = estimate_parameters(
-            config, total_vram, num_gpus, model_id, weight_info=weight_info
+            config, sizing_vram(vram_info, gpuids), num_gpus, model_id,
+            weight_info=weight_info,
         )
 
         gpu_info = f"{total_vram:.1f} GB"
         if num_gpus > 1:
-            gpu_info += f" ({num_gpus}x ~{total_vram / num_gpus:.1f} GB each)"
+            gpu_info += f" ({', '.join(f'{vram_info[g]:.1f}' for g in gpuids)} GB)"
         print(f"GPU VRAM: {gpu_info}")
+        _print_mixed_gpu_warning(vram_info, gpuids)
         print()
         _print_warnings(params)
 
@@ -304,16 +324,17 @@ def profile(
 
         num_gpus = len(gpuids)
         total_vram = sum(vram_info[gid] for gid in gpuids)
-        small_gpu = total_vram / num_gpus < 8
         weight_info = _resolve_weight_info(config_repo_id, config)
         initial_params = estimate_parameters(
-            config, total_vram, num_gpus=num_gpus, model_id=model_id, weight_info=weight_info
+            config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
+            model_id=model_id, weight_info=weight_info,
         )
         initial_params["gpu_ids"] = gpuids
 
         print(
             f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
         )
+        _print_mixed_gpu_warning(vram_info, gpuids)
         print("[yellow]🔍 Starting dynamic profiling...[/yellow]")
         print()
         _print_warnings(initial_params)
@@ -423,13 +444,15 @@ def serve(
         num_gpus = len(gpuids)
         total_vram = sum(vram_info[gid] for gid in gpuids)
         initial_params = estimate_parameters(
-            config, total_vram, num_gpus=num_gpus, model_id=model_id, weight_info=weight_info
+            config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
+            model_id=model_id, weight_info=weight_info,
         )
         initial_params["gpu_ids"] = gpuids
 
         print(
             f"[yellow]Using {num_gpus} GPU(s): {gpuids} ({total_vram:.1f} GB total)[/yellow]"
         )
+        _print_mixed_gpu_warning(vram_info, gpuids)
         print("[yellow]🔍 Profiling optimal parameters...[/yellow]")
         print()
         _print_warnings(initial_params)
