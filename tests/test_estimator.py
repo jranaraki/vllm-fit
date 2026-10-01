@@ -482,3 +482,14 @@ def test_sliding_layers_cost_less_than_full():
     all_full = estimate_parameters({**cfg, "sliding_window": None}, total_vram=80.0,
                                    weight_info=wi)
     assert hybrid["max_model_len"] > 3 * all_full["max_model_len"]
+
+
+def test_idle_gpu_reservation_caps_without_warning():
+    # A 4 GB card reports ~0.3 GB used when idle: utilization is still capped to what
+    # vLLM's startup check allows, but nobody is told "other processes" hold memory.
+    cfg = {"hidden_size": 1024, "num_hidden_layers": 28, "num_attention_heads": 16,
+           "num_key_value_heads": 8, "vocab_size": 151936}
+    wi = WeightInfo(source="test", weights_bytes=int(1.4 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=4.0, weight_info=wi, free_vram=3.7)
+    assert res["gpu_memory_utilization"] * 4.0 <= 3.7 - 0.5
+    assert not any("already in use" in w for w in res["warnings"])
