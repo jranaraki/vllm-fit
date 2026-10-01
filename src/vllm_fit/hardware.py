@@ -1,4 +1,5 @@
 import glob
+import importlib.util
 import os
 import platform
 import shutil
@@ -165,21 +166,64 @@ def _undetected_accelerator(nvml_error: Optional[str]) -> Optional[str]:
     return None
 
 
-def detect_hardware(device: str = "auto") -> str:
-    """Return the hardware type to target, "gpu" or "cpu".
+# Fallback share of unified memory Metal lets one process keep resident, used only when
+# MLX can't report the real limit (it was 0.78 on a 48 GB M-series Mac).
+_METAL_WORKING_SET_FALLBACK = 2 / 3
 
-    ``device="auto"`` picks the GPU when NVIDIA GPUs are visible and the CPU backend
-    when no accelerator is present at all; an accelerator that can't be sized raises
+
+def metal_backend_available() -> bool:
+    """True when vLLM can serve on the Apple GPU here: Apple Silicon with the
+    vllm-metal plugin installed in this Python environment."""
+    return is_apple_silicon() and importlib.util.find_spec("vllm_metal") is not None
+
+
+def get_metal_working_set() -> Tuple[float, bool]:
+    """Metal's recommended max working set in GiB, and whether it was measured.
+
+    vllm-metal sizes its KV cache as a fraction (--gpu-memory-utilization) of this
+    limit, not of total RAM. MLX reports it; without MLX, fall back to a conservative
+    share of RAM.
+    """
+    try:
+        import mlx.core as mx
+
+        limit = int(mx.device_info().get("max_recommended_working_set_size", 0))
+        if limit > 0:
+            return limit / 1024**3, True
+    except Exception:
+        pass
+    return get_ram_info() * _METAL_WORKING_SET_FALLBACK, False
+
+
+def get_available_ram() -> float:
+    """Memory the OS can hand out right now, in GiB."""
+    import psutil
+
+    return psutil.virtual_memory().available / (1024**3)
+
+
+def detect_hardware(device: str = "auto") -> str:
+    """Return the hardware type to target: "gpu", "metal" or "cpu".
+
+    ``device="auto"`` picks the GPU when NVIDIA GPUs are visible, the Apple GPU when
+    the vllm-metal plugin is installed on Apple Silicon, and the CPU backend when no
+    accelerator is present at all; an accelerator that can't be sized raises
     ``UnsupportedHardwareError`` instead of silently falling back to the CPU.
     """
     if device == "cpu":
         return "cpu"
+    if device == "metal":
+        if not is_apple_silicon():
+            raise UnsupportedHardwareError("--device metal needs an Apple Silicon Mac")
+        return "metal"
     gpu_memory, nvml_error = _query_gpu_memory()
     if gpu_memory:
         return "gpu"
     if device == "gpu":
         detail = f": {nvml_error}" if nvml_error else ""
         raise UnsupportedHardwareError(f"No usable NVIDIA GPU was found{detail}")
+    if device == "auto" and metal_backend_available():
+        return "metal"
     reason = _undetected_accelerator(nvml_error)
     if reason:
         raise UnsupportedHardwareError(reason)

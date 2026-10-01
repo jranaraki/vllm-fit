@@ -21,6 +21,7 @@ def test_is_apple_silicon_false_on_linux(monkeypatch):
 
 
 def _no_accelerator_files(monkeypatch):
+    monkeypatch.setattr(hardware, "metal_backend_available", lambda: False)
     monkeypatch.setattr(hardware.os.path, "exists", lambda path: False)
     monkeypatch.setattr(hardware.shutil, "which", lambda name: None)
     monkeypatch.setattr(hardware.glob, "glob", lambda pattern: [])
@@ -152,3 +153,44 @@ def test_query_respects_cuda_visible_devices(monkeypatch):
 def test_gpu_launch_env_pins_pci_order():
     assert hardware.gpu_launch_env([2, 3]) == {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "2,3"}
+
+
+def test_metal_detection(monkeypatch):
+    monkeypatch.setattr(hardware, "is_apple_silicon", lambda: True)
+    monkeypatch.setattr(hardware, "_query_gpu_memory", lambda: ({}, "NVMLError_LibraryNotFound"))
+    real_metal_check = hardware.metal_backend_available
+    _no_accelerator_files(monkeypatch)
+    monkeypatch.setattr(hardware, "metal_backend_available", real_metal_check)
+    monkeypatch.setattr(hardware.importlib.util, "find_spec",
+                        lambda name: object() if name == "vllm_metal" else None)
+    assert hardware.metal_backend_available()
+    assert detect_hardware() == "metal"
+    assert detect_hardware("cpu") == "cpu"
+
+    monkeypatch.setattr(hardware.importlib.util, "find_spec", lambda name: None)
+    assert detect_hardware() == "cpu"          # no plugin: CPU backend, as before
+    assert detect_hardware("metal") == "metal"  # explicit request still honoured
+
+
+def test_metal_device_needs_apple_silicon(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(hardware, "is_apple_silicon", lambda: False)
+    with pytest.raises(hardware.UnsupportedHardwareError, match="Apple Silicon"):
+        detect_hardware("metal")
+
+
+def test_metal_working_set_falls_back_without_mlx(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_mlx(name, *args, **kwargs):
+        if name.startswith("mlx"):
+            raise ImportError("no mlx")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_mlx)
+    monkeypatch.setattr(hardware, "get_ram_info", lambda: 48.0)
+    limit, measured = hardware.get_metal_working_set()
+    assert not measured and abs(limit - 32.0) < 1e-9

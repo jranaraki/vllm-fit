@@ -568,6 +568,80 @@ def test_sliding_request_matches_sliding_window_spec():
     from vllm_fit.estimator import KV_BLOCK_SIZE, _kv_bytes_per_request
 
     layout = AttentionLayout(0, 10, 1024)
-    # cdiv(min(window - 1 + batched, len), 16) + 1 blocks per sliding layer.
-    expected_blocks = -(-(1024 - 1 + 2048) // 16) + 1
+    # cdiv(min(window - 1 + 2 in-flight batches, len), 16) + 1 blocks per sliding layer.
+    expected_blocks = -(-(1024 - 1 + 2 * 2048) // 16) + 1
     assert _kv_bytes_per_request(layout, 1.0, 131072, 2048) == 10 * expected_blocks * KV_BLOCK_SIZE
+
+
+# Real vllm-metal startups on a 48 GB Apple Silicon Mac (vLLM 0.30, vllm-metal 0.30) at
+# --gpu-memory-utilization 0.9: Metal working set 40,200,896,512 bytes; the plugin's
+# "Upstream cache layout: reporting N GB KV budget" line gave the measured KV budgets.
+_METAL_WORKING_SET_GB = 40200896512 / 1024**3
+
+
+def _qwen3_0_6b():
+    return {"model_type": "qwen3", "hidden_size": 1024, "num_hidden_layers": 28,
+            "num_attention_heads": 16, "num_key_value_heads": 8, "head_dim": 128,
+            "intermediate_size": 3072, "vocab_size": 151936,
+            "max_position_embeddings": 40960, "tie_word_embeddings": True}
+
+
+def _qwen3_coder_30b_a3b():
+    return {"model_type": "qwen3_moe", "hidden_size": 2048, "num_hidden_layers": 48,
+            "num_attention_heads": 32, "num_key_value_heads": 4, "head_dim": 128,
+            "intermediate_size": 5472, "moe_intermediate_size": 768, "num_experts": 128,
+            "num_experts_per_tok": 8, "vocab_size": 151936,
+            "max_position_embeddings": 262144}
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("config,weights_bytes,measured_kv_bytes", [
+    (_qwen3_0_6b(), 1_503_264_768, 34.12e9),
+    (_qwen3_coder_30b_a3b(), 17_178_000_000, 18.13e9),
+])
+def test_metal_kv_budget_matches_real_vllm_metal(config, weights_bytes, measured_kv_bytes):
+    from vllm_fit.estimator import estimate_parameters_metal
+
+    wi = WeightInfo(source="test", weights_bytes=weights_bytes)
+    res = estimate_parameters_metal(config, _METAL_WORKING_SET_GB, weight_info=wi)
+    predicted = res["kv_cache_memory_gb"] * 1024**3
+    # Never more than vLLM actually allocated, and within 5% of it.
+    assert 0.95 * measured_kv_bytes <= predicted <= measured_kv_bytes
+    assert res["can_fit"] and res["tensor_parallel_size"] == 1
+    assert res["gpu_memory_utilization"] == 0.9
+
+
+def test_metal_caps_utilization_by_free_ram():
+    from vllm_fit.estimator import estimate_parameters_metal
+
+    wi = WeightInfo(source="test", weights_bytes=1_503_264_768)
+    res = estimate_parameters_metal(_qwen3_0_6b(), _METAL_WORKING_SET_GB, weight_info=wi,
+                                    available_ram_gb=20.0)
+    assert res["gpu_memory_utilization"] * _METAL_WORKING_SET_GB <= 20.0 - 2.0
+    assert any("free right now" in w for w in res["warnings"])
+
+
+def test_metal_unmeasured_working_set_warns_and_too_big_model_doesnt_fit():
+    from vllm_fit.estimator import estimate_parameters_metal
+
+    wi = WeightInfo(source="test", weights_bytes=int(40 * 1024**3))
+    res = estimate_parameters_metal(_qwen3_0_6b(), 32.0, weight_info=wi,
+                                    working_set_measured=False)
+    assert not res["can_fit"]
+    assert any("working-set limit" in w for w in res["warnings"])
+
+
+
+def test_gpt_oss_concurrency_matches_real_vllm_metal():
+    # mlx-community/gpt-oss-20b-MXFP4-Q8 on vllm-metal at max_model_len 131072:
+    # vLLM reported 59,003 KV blocks and "Maximum concurrency ... 6.98x".
+    from vllm_fit.config_resolver import AttentionLayout
+    from vllm_fit.estimator import KV_BLOCK_SIZE, _kv_bytes_per_request
+
+    layout = AttentionLayout(12, 12, 128)
+    per_layer_token = 2 * 8 * 64 * 2
+    block_bytes = KV_BLOCK_SIZE * per_layer_token * 12  # one block across a 12-layer group
+    request_blocks = _kv_bytes_per_request(layout, per_layer_token, 131072, 2048) / block_bytes
+    assert abs(59003 / request_blocks - 6.98) < 0.005
