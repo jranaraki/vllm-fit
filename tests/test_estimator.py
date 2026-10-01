@@ -407,3 +407,33 @@ def test_is_gguf_model():
     assert is_gguf_model("model:Q4_0")
     assert not is_gguf_model("Qwen/Qwen2.5-1.5B")
     assert not is_gguf_model("Qwen/Qwen2.5-1.5B-Instruct")
+
+
+def test_utilization_capped_by_free_vram():
+    # 8 GB card with ~1 GB held by the display: 0.90 x 8 = 7.2 GB > 7.0 GB free, which
+    # vLLM rejects at startup. The recommendation must fit inside free memory.
+    cfg = {"hidden_size": 2048, "num_hidden_layers": 24, "num_attention_heads": 16,
+           "vocab_size": 32000}
+    wi = WeightInfo(source="test", weights_bytes=int(2 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=8.0, weight_info=wi, free_vram=7.0)
+    util = res["gpu_memory_utilization"]
+    assert util * 8.0 <= 7.0 - 0.5
+    assert any("already in use" in w for w in res["warnings"])
+
+
+def test_idle_gpu_keeps_default_utilization():
+    cfg = {"hidden_size": 2048, "num_hidden_layers": 24, "num_attention_heads": 16,
+           "vocab_size": 32000}
+    wi = WeightInfo(source="test", weights_bytes=int(2 * 1024**3))
+    idle = estimate_parameters(cfg, total_vram=24.0, weight_info=wi, free_vram=23.6)
+    unknown = estimate_parameters(cfg, total_vram=24.0, weight_info=wi)
+    assert idle["gpu_memory_utilization"] == unknown["gpu_memory_utilization"] == 0.9
+    assert not any("already in use" in w for w in idle["warnings"])
+
+
+def test_busy_gpu_cannot_fit_when_free_memory_too_small():
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+           "vocab_size": 32000}
+    wi = WeightInfo(source="test", weights_bytes=int(14 * 1024**3))
+    res = estimate_parameters(cfg, total_vram=24.0, weight_info=wi, free_vram=10.0)
+    assert res["can_fit"] is False

@@ -7,8 +7,8 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .engine_tester import profile_parameters, profile_parameters_cpu
-from .estimator import estimate_parameters, estimate_parameters_cpu
-from .hardware import get_vram_info, detect_hardware, get_ram_info, is_apple_silicon
+from .estimator import _CUDA_CONTEXT_GB, estimate_parameters, estimate_parameters_cpu
+from .hardware import get_free_vram_info, get_vram_info, detect_hardware, get_ram_info, is_apple_silicon
 from .params import resolve_weights
 from .registry import get_model_config
 
@@ -90,6 +90,20 @@ def _print_mixed_gpu_warning(vram_info: dict, gpuids: list[int]) -> None:
             f"[yellow]⚠ Mixed GPU sizes ({', '.join(f'{s:.1f}' for s in sizes)} GB); "
             f"sizing every GPU as {min(sizes):.1f} GB[/yellow]"
         )
+
+
+def free_vram_for_sizing(vram_info: dict, gpuids: list[int]) -> Optional[float]:
+    """Free memory to size against, expressed on the smallest selected GPU.
+
+    vLLM requires free >= utilization x total on every device, so the binding GPU is
+    the one with the lowest (free - CUDA context) / total ratio, not simply the one
+    with the least free memory. Returns None if free memory can't be read.
+    """
+    free = get_free_vram_info()
+    if not all(gid in free for gid in gpuids):
+        return None
+    ratio = min((free[g] - _CUDA_CONTEXT_GB) / vram_info[g] for g in gpuids)
+    return ratio * min(vram_info[g] for g in gpuids) + _CUDA_CONTEXT_GB
 
 
 def _show_no_hardware_error():
@@ -183,7 +197,7 @@ def recommend(
         num_gpus = len(gpuids)
         params = estimate_parameters(
             config, sizing_vram(vram_info, gpuids), num_gpus, model_id,
-            weight_info=weight_info,
+            weight_info=weight_info, free_vram=free_vram_for_sizing(vram_info, gpuids),
         )
 
         gpu_info = f"{total_vram:.1f} GB"
@@ -328,6 +342,7 @@ def profile(
         initial_params = estimate_parameters(
             config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
             model_id=model_id, weight_info=weight_info,
+            free_vram=free_vram_for_sizing(vram_info, gpuids),
         )
         initial_params["gpu_ids"] = gpuids
 
@@ -446,6 +461,7 @@ def serve(
         initial_params = estimate_parameters(
             config, sizing_vram(vram_info, gpuids), num_gpus=num_gpus,
             model_id=model_id, weight_info=weight_info,
+            free_vram=free_vram_for_sizing(vram_info, gpuids),
         )
         initial_params["gpu_ids"] = gpuids
 

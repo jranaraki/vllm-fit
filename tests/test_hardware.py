@@ -28,3 +28,35 @@ def test_detect_hardware_cpu_when_no_vram(monkeypatch):
 def test_detect_hardware_gpu_when_vram_present(monkeypatch):
     monkeypatch.setattr(hardware, "get_vram_info", lambda: {0: 24.0})
     assert detect_hardware() == "gpu"
+
+
+class _FakeMem:
+    def __init__(self, total_gb, free_gb):
+        self.total = int(total_gb * 1024**3)
+        self.free = int(free_gb * 1024**3)
+
+
+class _FakeNvml:
+    def __init__(self, mems):
+        self._mems = mems
+
+    def nvmlInit(self):
+        pass
+
+    def nvmlShutdown(self):
+        pass
+
+    def nvmlDeviceGetCount(self):
+        return len(self._mems)
+
+    def nvmlDeviceGetHandleByIndex(self, i):
+        return i
+
+    def nvmlDeviceGetMemoryInfo(self, handle):
+        return self._mems[handle]
+
+
+def test_vram_total_and_free_from_nvml(monkeypatch):
+    monkeypatch.setattr(hardware, "pynvml", _FakeNvml([_FakeMem(24, 22.5), _FakeMem(80, 60)]))
+    assert hardware.get_vram_info() == {0: 24.0, 1: 80.0}
+    assert hardware.get_free_vram_info() == {0: 22.5, 1: 60.0}

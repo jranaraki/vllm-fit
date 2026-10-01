@@ -65,3 +65,23 @@ def test_mixed_gpus_do_not_fit_13b_fp16_on_24gb_card():
     res = estimate_parameters(cfg, sizing_vram(vram_info, [0, 1]), 2, weight_info=wi)
     assert res["tensor_parallel_size"] == 2
     assert res["per_gpu_weights_gb"] < 0.9 * 24.0
+
+
+def test_free_vram_binds_on_busiest_gpu_ratio(monkeypatch):
+    # 24 GB idle + 80 GB with 50 GB used: the 80 GB card can only take ~0.37 of its
+    # total, even though the 24 GB card has less free memory in absolute terms.
+    import vllm_fit.cli as cli
+    from vllm_fit.estimator import estimate_parameters
+    from vllm_fit.params import WeightInfo
+
+    vram_info = {0: 24.0, 1: 80.0}
+    monkeypatch.setattr(cli, "get_free_vram_info", lambda: {0: 23.5, 1: 30.0})
+    free = cli.free_vram_for_sizing(vram_info, [0, 1])
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32, "num_attention_heads": 32,
+           "vocab_size": 32000}
+    wi = WeightInfo(source="test", weights_bytes=int(4 * 1024**3))
+    res = estimate_parameters(cfg, cli.sizing_vram(vram_info, [0, 1]), 2,
+                              weight_info=wi, free_vram=free)
+    util = res["gpu_memory_utilization"]
+    assert util * 80.0 <= 30.0 - 0.5
+    assert util * 24.0 <= 23.5 - 0.5

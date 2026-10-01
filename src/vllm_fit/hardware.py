@@ -1,6 +1,6 @@
 import platform
 import warnings
-from typing import Dict
+from typing import Dict, Tuple
 
 
 try:
@@ -14,21 +14,22 @@ except ImportError:
         pynvml = None
 
 
-def get_vram_info() -> Dict[int, float]:
-    vram_info = {}
+def _query_gpu_memory() -> Dict[int, Tuple[float, float]]:
+    """Per-GPU ``(total_gb, free_gb)``; empty when no GPU can be queried."""
+    mem = {}
 
     if pynvml is None:
         try:
             import torch
 
             if not torch.cuda.is_available():
-                return vram_info
-            return {
-                i: torch.cuda.get_device_properties(i).total_memory / 1024**3
-                for i in range(torch.cuda.device_count())
-            }
+                return mem
+            for i in range(torch.cuda.device_count()):
+                free, total = torch.cuda.mem_get_info(i)
+                mem[i] = (total / 1024**3, free / 1024**3)
+            return mem
         except:
-            return vram_info
+            return mem
 
     try:
         pynvml.nvmlInit()
@@ -36,17 +37,27 @@ def get_vram_info() -> Dict[int, float]:
 
         if device_count == 0:
             pynvml.nvmlShutdown()
-            return vram_info
+            return mem
 
         for i in range(device_count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            vram_info[i] = mem_info.total / 1024**3
+            mem[i] = (mem_info.total / 1024**3, mem_info.free / 1024**3)
         pynvml.nvmlShutdown()
     except Exception:
-        return vram_info
+        return mem
 
-    return vram_info
+    return mem
+
+
+def get_vram_info() -> Dict[int, float]:
+    """Total memory per GPU, in GiB."""
+    return {i: total for i, (total, _) in _query_gpu_memory().items()}
+
+
+def get_free_vram_info() -> Dict[int, float]:
+    """Currently free memory per GPU, in GiB (other processes' usage excluded)."""
+    return {i: free for i, (_, free) in _query_gpu_memory().items()}
 
 
 def get_ram_info() -> float:
