@@ -353,6 +353,7 @@ def profile(
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
+            config_repo_id=config_repo_id,
         )
 
         elapsed_time = time.time() - start_time
@@ -422,6 +423,7 @@ def profile(
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
+            config_repo_id=config_repo_id,
         )
 
         elapsed_time = time.time() - start_time
@@ -503,6 +505,7 @@ def serve(
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
+            config_repo_id=config_repo_id,
         )
         kv_space = params.get("kv_cache_space_gb")
         if kv_space:
@@ -538,6 +541,7 @@ def serve(
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
             timeout=timeout,
+            config_repo_id=config_repo_id,
         )
         env.update(gpu_launch_env(gpuids))
 

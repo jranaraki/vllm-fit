@@ -99,3 +99,34 @@ def test_gpu_probe_pins_devices_in_pci_order(monkeypatch):
     et._test_configuration("org/model", 0.9, 4096, 2, 4, False, [2, 3])
     assert seen["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert seen["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+
+def test_cpu_probe_matches_served_command(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: seen.update(kw) or True)
+    et._test_configuration_cpu("org/model-GGUF:Q8_0", 8192, 4, True,
+                               config_repo_id="org/model")
+    # Some vLLM CPU builds disable chunked prefill; the served command pins this too.
+    assert seen["max_num_batched_tokens"] == 8192
+    assert seen["hf_config_path"] == "org/model"
+    assert seen["tokenizer"] == "org/model"
+
+
+def test_gpu_probe_has_no_config_override_for_regular_repo(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: seen.update(kw) or True)
+    et._test_configuration("org/model", 0.9, 4096, 1, 4, False, [0], config_repo_id="org/model")
+    assert "hf_config_path" not in seen and "tokenizer" not in seen
+
+
+def test_profile_threads_config_repo_to_every_probe(monkeypatch):
+    monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    repos = []
+
+    def fake(*args, config_repo_id=None, **kwargs):
+        repos.append(config_repo_id)
+        return True, False
+
+    monkeypatch.setattr(et, "_test_configuration", fake)
+    et.profile_parameters("org/model-GGUF:Q4_K_M", _gpu_initial(), config_repo_id="org/model")
+    assert repos and set(repos) == {"org/model"}
