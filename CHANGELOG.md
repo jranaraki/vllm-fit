@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.8 (2026-10-01)
+
+### Bug Fixes
+
+- Stop pinning --max_num_batched_tokens 2048
+  ([`0d63cda`](https://github.com/jranaraki/vllm-fit/commit/0d63cda0d6d51472a412a0172ba2579d8401900c))
+
+
 ## v0.5.7 (2026-10-01)
 
 ### Bug Fixes
