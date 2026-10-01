@@ -64,6 +64,7 @@ def test_profile_stops_on_non_memory_failure(monkeypatch):
 
 def test_profile_passes_timeout_to_every_probe(monkeypatch):
     monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: None)
     timeouts = []
 
     def fake(*args, timeout=None, **kwargs):
@@ -78,6 +79,7 @@ def test_profile_passes_timeout_to_every_probe(monkeypatch):
 
 def test_cpu_search_never_lowers_a_working_length(monkeypatch):
     monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: None)
     # Oracle: anything up to 3500 tokens fits.
     monkeypatch.setattr(
         et, "_test_configuration_cpu",
@@ -93,7 +95,7 @@ def test_gpu_probe_pins_devices_in_pci_order(monkeypatch):
 
     def fake_probe(env, llm_kwargs, timeout):
         seen.update(env)
-        return True
+        return True, ""
 
     monkeypatch.setattr(et, "_run_probe", fake_probe)
     et._test_configuration("org/model", 0.9, 4096, 2, 4, False, [2, 3])
@@ -103,7 +105,7 @@ def test_gpu_probe_pins_devices_in_pci_order(monkeypatch):
 
 def test_cpu_probe_matches_served_command(monkeypatch):
     seen = {}
-    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: seen.update(kw) or True)
+    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: (seen.update(kw) or True, ""))
     et._test_configuration_cpu("org/model-GGUF:Q8_0", 8192, 4, True,
                                config_repo_id="org/model")
     # Some vLLM CPU builds disable chunked prefill; the served command pins this too.
@@ -114,7 +116,7 @@ def test_cpu_probe_matches_served_command(monkeypatch):
 
 def test_gpu_probe_has_no_config_override_for_regular_repo(monkeypatch):
     seen = {}
-    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: seen.update(kw) or True)
+    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: (seen.update(kw) or True, ""))
     et._test_configuration("org/model", 0.9, 4096, 1, 4, False, [0], config_repo_id="org/model")
     assert "hf_config_path" not in seen and "tokenizer" not in seen
 
@@ -128,6 +130,10 @@ def test_profile_threads_config_repo_to_every_probe(monkeypatch):
         return True, False
 
     monkeypatch.setattr(et, "_test_configuration", fake)
+    monkeypatch.setattr(
+        et, "_measure_concurrency",
+        lambda *a, config_repo_id=None, **k: repos.append(config_repo_id),
+    )
     et.profile_parameters("org/model-GGUF:Q4_K_M", _gpu_initial(), config_repo_id="org/model")
     assert repos and set(repos) == {"org/model"}
 
@@ -135,6 +141,7 @@ def test_profile_threads_config_repo_to_every_probe(monkeypatch):
 def test_length_search_never_exceeds_model_limit(monkeypatch):
     # Qwen3-0.6B: vLLM rejects max_model_len > 40960 with a non-memory error.
     monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: None)
     tried = []
 
     def fake(model, util, length, tp, seqs, eager, gpu_ids, **kw):
@@ -152,8 +159,70 @@ def test_length_search_never_exceeds_model_limit(monkeypatch):
 
 def test_cpu_length_search_respects_model_limit(monkeypatch):
     monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: None)
     tried = []
     monkeypatch.setattr(et, "_test_configuration_cpu",
                         lambda model, length, seqs, eager, **kw: (tried.append(length) or True, False))
     res = et.profile_parameters_cpu("org/model", _cpu_initial(3000), max_len_cap=4096)
     assert max(tried) <= 4096 and res["max_model_len"] == 4096
+
+
+def test_measure_concurrency_parses_real_vllm_log(monkeypatch):
+    log = ("INFO GPU KV cache size: 190,464 tokens, Maximum concurrency for "
+           "32,768 tokens per request: 5.81x\n")
+    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: (True, log))
+    result = et._measure_concurrency("org/model", 0.9, 32768, 1, False, [0])
+    assert result == 5.81
+
+
+def test_measure_concurrency_returns_none_on_failure(monkeypatch):
+    monkeypatch.setattr(et, "_run_probe", lambda env, kw, timeout: (False, "OOM"))
+    assert et._measure_concurrency("org/model", 0.9, 32768, 1, False, [0]) is None
+
+
+def test_measure_concurrency_returns_none_on_abort(monkeypatch):
+    def raises(*a, **k):
+        raise ProfilingAborted("vLLM failed for a reason other than memory")
+
+    monkeypatch.setattr(et, "_run_probe", raises)
+    assert et._measure_concurrency("org/model", 0.9, 32768, 1, False, [0]) is None
+
+
+def test_measure_concurrency_returns_none_when_unparseable():
+    # No real _run_probe call needed: nothing to monkeypatch, just confirm the parser
+    # miss (not an exception) yields None via the public parse_startup_log path.
+    from vllm_fit.vllm_log import parse_startup_log
+
+    assert parse_startup_log("no useful lines here").get("max_concurrency") is None
+
+
+def test_profile_uses_measured_concurrency_over_the_static_estimate(monkeypatch):
+    # This is the bug: the old seqs binary search reported 28 for a model whose real
+    # capacity (vLLM's own "Maximum concurrency" line) is ~7 at the final length.
+    monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_test_configuration", lambda *a, **k: (True, False))
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: 6.98)
+    res = et.profile_parameters("Qwen/Qwen3-0.6B", {**_gpu_initial(), "max_num_seqs": 28})
+    assert res["max_num_seqs"] == 6
+
+
+def test_profile_keeps_estimate_when_measurement_unavailable(monkeypatch):
+    monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_test_configuration", lambda *a, **k: (True, False))
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: None)
+    res = et.profile_parameters("org/model", {**_gpu_initial(), "max_num_seqs": 11})
+    assert res["max_num_seqs"] == 11
+
+
+def test_cpu_profile_uses_measured_concurrency(monkeypatch):
+    monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    monkeypatch.setattr(et, "_test_configuration_cpu", lambda *a, **k: (True, False))
+    monkeypatch.setattr(et, "_measure_concurrency", lambda *a, **k: 3.4)
+    res = et.profile_parameters_cpu("org/model", _cpu_initial(3000))
+    assert res["max_num_seqs"] == 3
+
+
+def test_seqs_binary_search_was_removed():
+    # The old function searched for "the largest max_num_seqs that still starts",
+    # which vLLM accepts almost regardless of real capacity. It must stay gone.
+    assert not hasattr(et, "_binary_search_max_num_seqs")

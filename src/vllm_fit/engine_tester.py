@@ -101,11 +101,13 @@ def _kill_process_group(p) -> None:
     p.join()
 
 
-def _run_probe(env: dict, llm_kwargs: dict, timeout: int) -> bool:
+def _run_probe(env: dict, llm_kwargs: dict, timeout: int) -> Tuple[bool, str]:
     """Launch one vLLM engine in a child process.
 
-    Returns True if it started, False if it failed for lack of memory. Raises
-    ``ProfilingAborted`` on a timeout or any other failure.
+    Returns ``(started, log_text)``: ``started`` is False only when the failure looks
+    like insufficient memory. Raises ``ProfilingAborted`` on a timeout or any other
+    failure. ``log_text`` is vLLM's captured stdout/stderr either way, so a caller can
+    read the figures vLLM logged on a successful start (see ``_measure_concurrency``).
     """
     fd, log_path = tempfile.mkstemp(prefix="vllm-fit-", suffix=".log")
     os.close(fd)
@@ -130,13 +132,13 @@ def _run_probe(env: dict, llm_kwargs: dict, timeout: int) -> bool:
         # Reap any engine/worker processes left in the group.
         _kill_process_group(p)
 
-        if p.exitcode == 0:
-            return True
-
         with open(log_path, errors="replace") as f:
             log_text = f.read()
+
+        if p.exitcode == 0:
+            return True, log_text
         if _is_memory_failure(log_text, p.exitcode):
-            return False
+            return False, log_text
         raise ProfilingAborted(
             f"vLLM failed for a reason other than memory (exit code {p.exitcode})",
             _log_tail(log_text),
@@ -169,7 +171,7 @@ def _test_configuration_cpu(
     # Size the CPU KV cache to match what we recommend, so the probe is representative.
     if kv_cache_space_gb and kv_cache_space_gb > 0:
         env["VLLM_CPU_KVCACHE_SPACE"] = str(kv_cache_space_gb)
-    started = _run_probe(
+    started, _log_text = _run_probe(
         env,
         dict(
             model=model_id,
@@ -204,7 +206,7 @@ def _test_configuration(
     }
     if gpu_ids:
         env.update(gpu_launch_env(gpu_ids))
-    started = _run_probe(
+    started, _log_text = _run_probe(
         env,
         dict(
             model=model_id,
@@ -220,51 +222,70 @@ def _test_configuration(
     return started, False
 
 
-def _binary_search_max_num_seqs(
+def _measure_concurrency(
     model_id: str,
-    fixed_params: dict,
-    progress_callback: Optional[Callable[[str], None]] = None,
-    on_test: Optional[Callable[[], None]] = None,
-) -> int:
-    gpu_ids = fixed_params["gpu_ids"]
-    gpu_memory_utilization = fixed_params["gpu_memory_utilization"]
-    max_model_len = fixed_params["max_model_len"]
-    tensor_parallel_size = fixed_params["tensor_parallel_size"]
-    enforce_eager = fixed_params["enforce_eager"]
+    gpu_memory_utilization: Optional[float],
+    max_model_len: int,
+    tensor_parallel_size: int,
+    enforce_eager: bool,
+    gpu_ids: List[int],
+    timeout: int = DEFAULT_TIMEOUT,
+    config_repo_id: Optional[str] = None,
+    kv_cache_space_gb: Optional[int] = None,
+) -> Optional[float]:
+    """One launch at the verified ``max_model_len``, reading vLLM's own
+    "Maximum concurrency for N tokens per request: X.XXx" line.
 
-    low = 1
-    high = fixed_params["max_num_seqs"] * 4
-    best = fixed_params["max_num_seqs"]
+    vLLM only checks that a *single* max_model_len-sized request fits in KV at
+    startup — it never checks ``max_num_seqs`` against capacity — so searching for
+    "the largest max_num_seqs that still starts" mostly confirmed whatever value was
+    asked for, regardless of how many such requests actually fit. This reads the
+    authoritative figure from vLLM's own log instead.
 
-    while low <= high:
-        mid = (low + high) // 2
+    Returns ``None`` if the probe fails or the figure can't be parsed; the caller
+    then keeps its own (already KV-aware) estimate.
+    """
+    is_cpu = gpu_memory_utilization is None
+    if is_cpu:
+        env = {"OMP_NUM_THREADS": str(os.cpu_count() or 4)}
+        if kv_cache_space_gb and kv_cache_space_gb > 0:
+            env["VLLM_CPU_KVCACHE_SPACE"] = str(kv_cache_space_gb)
+    else:
+        env = {
+            "NCCL_DEBUG": "WARN",
+            "GLOG_v": "3",
+            "GLOO_DEBUG": "WARN",
+            "TORCH_CPP_LOG_LEVEL": "ERROR",
+        }
+        if gpu_ids:
+            env.update(gpu_launch_env(gpu_ids))
 
-        if progress_callback:
-            progress_callback(
-                f"  Binary search Seqs: testing {mid} (range {low}-{high})"
-            )
+    kwargs = dict(
+        model=model_id,
+        max_model_len=max_model_len,
+        enforce_eager=enforce_eager,
+        # The probe's own max_num_seqs doesn't affect whether vLLM starts or how much
+        # KV it reports (vLLM derives concurrency from capacity, not the other way
+        # round), so a generous placeholder is fine here.
+        max_num_seqs=256,
+        **_config_override_kwargs(model_id, config_repo_id),
+    )
+    if is_cpu:
+        kwargs["max_num_batched_tokens"] = max_model_len
+    else:
+        kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+        kwargs["tensor_parallel_size"] = tensor_parallel_size
 
-        if on_test:
-            on_test()
-        success, timeout = _test_configuration(
-            model_id,
-            gpu_memory_utilization,
-            max_model_len,
-            tensor_parallel_size,
-            mid,
-            enforce_eager,
-            gpu_ids,
-            timeout=fixed_params.get("timeout", DEFAULT_TIMEOUT),
-            config_repo_id=fixed_params.get("config_repo_id"),
-        )
+    try:
+        started, log_text = _run_probe(env, kwargs, timeout)
+    except ProfilingAborted:
+        return None
+    if not started:
+        return None
 
-        if success and not timeout:
-            best = mid
-            low = mid + 1
-        else:
-            high = mid - 1
+    from .vllm_log import parse_startup_log
 
-    return best
+    return parse_startup_log(log_text).get("max_concurrency")
 
 
 def _binary_search_max_model_len(
@@ -463,15 +484,26 @@ def profile_parameters(
             "max_len_cap": max_len_cap,
         }
 
-        max_num_seqs = _binary_search_max_num_seqs(
-            model_id, fixed_params, progress_callback, _count_test
-        )
-        fixed_params["max_num_seqs"] = max_num_seqs
-
         max_model_len = _binary_search_max_model_len(
             model_id, fixed_params, progress_callback, _count_test
         )
         fixed_params["max_model_len"] = max_model_len
+
+        if progress_callback:
+            progress_callback("[cyan]Measuring real concurrency at that length...[/cyan]")
+        total_attempts += 1
+        measured = _measure_concurrency(
+            model_id,
+            gpu_memory_utilization,
+            max_model_len,
+            tensor_parallel_size,
+            enforce_eager,
+            gpu_ids,
+            timeout=probe_timeout,
+            config_repo_id=config_repo_id,
+        )
+        if measured is not None:
+            max_num_seqs = max(1, min(256, int(measured)))
 
         if progress_callback:
             progress_callback("[green]✓ Optimization complete![/green]")
@@ -658,6 +690,23 @@ def profile_parameters_cpu(
                 high = mid - 1
 
         max_model_len = best
+
+        if progress_callback:
+            progress_callback("[cyan]Measuring real concurrency at that length...[/cyan]")
+        total_attempts += 1
+        measured = _measure_concurrency(
+            model_id,
+            None,
+            max_model_len,
+            1,
+            enforce_eager,
+            [],
+            timeout=probe_timeout,
+            config_repo_id=config_repo_id,
+            kv_cache_space_gb=kv_cache_space_gb,
+        )
+        if measured is not None:
+            max_num_seqs = max(1, min(256, int(measured)))
 
         if progress_callback:
             progress_callback("[green]✓ Optimization complete![/green]")
