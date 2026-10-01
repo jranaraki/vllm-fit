@@ -37,3 +37,17 @@ def test_gpu_command_has_no_kvcache_env():
     cmd = _format_vllm_command("some/model", _gpu_params(), hardware_type="gpu")
     assert "VLLM_CPU_KVCACHE_SPACE" not in cmd
     assert cmd.startswith("vllm serve some/model")
+
+
+def test_printed_command_is_not_wrapped(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    import vllm_fit.cli as cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=40, force_terminal=False))
+    cmd = _format_vllm_command("org/[weird]-model", _gpu_params(), hardware_type="gpu")
+    cli._print_command(cmd)
+    assert buf.getvalue() == cmd + "\n"

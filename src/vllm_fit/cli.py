@@ -163,6 +163,12 @@ def _format_vllm_command(
     return " ".join(args)
 
 
+def _print_command(cmd: str) -> None:
+    """Print a copy-pasteable command on one line: no hard wrapping at the terminal
+    width (pasting a wrapped command runs a truncated one) and no markup parsing."""
+    console.print(cmd, style="dim", soft_wrap=True, markup=False, highlight=False)
+
+
 @app.command()
 def recommend(
     model_id: str,
@@ -245,8 +251,8 @@ def recommend(
         print(f"VLLM_CPU_KVCACHE_SPACE: {params['kv_cache_space_gb']} GB")
     print()
     print("[bold cyan]Run this command:[/bold cyan]")
-    print(
-        f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
+    _print_command(
+        _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)
     )
 
 
@@ -324,8 +330,8 @@ def profile(
             print(f"enforce_eager: True")
         print()
         print("[bold cyan]Run this command:[/bold cyan]")
-        print(
-            f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
+        _print_command(
+            _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)
         )
     else:
         vram_info = get_vram_info()
@@ -405,8 +411,8 @@ def profile(
             print(f"enforce_eager: True")
         print()
         print("[bold cyan]Run this command:[/bold cyan]")
-        print(
-            f"[dim]{_format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)}[/dim]"
+        _print_command(
+            _format_vllm_command(model_id, params, params.get('enforce_eager', False), config_repo_id, hardware_type)
         )
 
 
