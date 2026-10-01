@@ -83,27 +83,62 @@ def test_max_len_plain():
     assert derive_max_model_len({"max_position_embeddings": 8192}) == 8192
 
 
-def test_max_len_model_max_length_wins():
-    cfg = {"max_position_embeddings": 8192, "model_max_length": 4096}
-    assert derive_max_model_len(cfg) == 4096
+def test_max_len_model_max_length_only_raises_limit():
+    # vLLM accepts lengths up to a config-level model_max_length, but a smaller one
+    # doesn't lower the positional limit.
+    assert derive_max_model_len({"max_position_embeddings": 8192, "model_max_length": 4096}) == 8192
+    assert derive_max_model_len({"max_position_embeddings": 4096, "model_max_length": 8192}) == 8192
+    assert derive_max_model_len({"model_max_length": 2048}) == 2048
 
 
-def test_max_len_yarn_scales_from_original():
+def test_max_len_yarn_max_position_already_scaled():
     cfg = {
         "max_position_embeddings": 32768,
         "rope_scaling": {"rope_type": "yarn", "factor": 4.0,
                          "original_max_position_embeddings": 8192},
     }
-    assert derive_max_model_len(cfg) == 32768  # 8192 * 4
+    assert derive_max_model_len(cfg) == 32768  # factor not applied again
 
 
-def test_max_len_longrope_uses_original():
+def test_max_len_longrope_limit_is_max_position():
+    # The original length is only vLLM's default; the accepted limit is max_pos.
     cfg = {
         "max_position_embeddings": 131072,
         "rope_scaling": {"rope_type": "longrope", "factor": 8.0,
                          "original_max_position_embeddings": 4096},
     }
-    assert derive_max_model_len(cfg) == 4096
+    assert derive_max_model_len(cfg) == 131072
+
+
+def test_max_len_qwen3_yarn_recipe():
+    # Qwen docs' "enable YaRN" recipe: max_pos 40960, factor 4, original 32768.
+    # Current vLLM does not multiply, so 131072 would be rejected at startup.
+    cfg = {
+        "max_position_embeddings": 40960,
+        "rope_scaling": {"rope_type": "yarn", "factor": 4.0,
+                         "original_max_position_embeddings": 32768},
+    }
+    assert derive_max_model_len(cfg) == 40960
+
+
+def test_max_len_deepseek_yarn_not_scaled():
+    cfg = {"max_position_embeddings": 163840,
+           "rope_scaling": {"type": "deepseek_yarn", "factor": 40}}
+    assert derive_max_model_len(cfg) == 163840
+
+
+def test_max_len_rope_parameters_v5_key():
+    cfg = {"max_position_embeddings": 4096,
+           "rope_parameters": {"rope_type": "linear", "factor": 2.0}}
+    assert derive_max_model_len(cfg) == 8192
+
+
+def test_max_len_nested_rope_parameters():
+    # transformers v5 per-layer-type RoPE (e.g. Qwen3.5); layers without RoPE are None.
+    cfg = {"max_position_embeddings": 32768,
+           "rope_parameters": {"full_attention": {"rope_type": "default", "rope_theta": 1e7},
+                               "linear_attention": None}}
+    assert derive_max_model_len(cfg) == 32768
 
 
 def test_max_len_gemma3_no_plain_factor():

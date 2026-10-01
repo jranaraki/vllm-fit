@@ -177,57 +177,63 @@ def get_head_dim(config: Dict[str, Any]) -> Optional[int]:
     return None
 
 
-def derive_max_model_len(config: Dict[str, Any]) -> Optional[int]:
-    """Model's true maximum context, mirroring vLLM's derivation.
+# RoPE types whose max_position_embeddings is already the scaled limit, so vLLM does
+# not multiply it by ``factor`` (vllm/config/model.py, _get_and_verify_max_len).
+_ROPE_NO_FACTOR = ("su", "longrope", "llama3", "yarn", "deepseek_yarn", "deepseek_llama_scaling")
 
-    Scans the text config for the smallest positional limit (``model_max_length``
-    wins outright when present), then applies RoPE scaling with the yarn / longrope /
-    gemma3 exceptions. Returns ``None`` when no positional field is present.
+
+def _rope_parameter_sets(tc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """RoPE settings from ``rope_parameters`` (transformers v5; may be nested per layer
+    type) or the older ``rope_scaling``. Layers without RoPE (``None``) are dropped."""
+    rope = tc.get("rope_parameters")
+    if rope is None:
+        rope = tc.get("rope_scaling")
+    if not isinstance(rope, dict) or not rope:
+        return []
+    if all(v is None or isinstance(v, dict) for v in rope.values()):
+        return [v for v in rope.values() if isinstance(v, dict)]
+    return [rope]
+
+
+def derive_max_model_len(config: Dict[str, Any]) -> Optional[int]:
+    """Largest ``max_model_len`` vLLM accepts for this model, mirroring
+    ``_get_and_verify_max_len`` in current vLLM.
+
+    The smallest positional limit, times the RoPE factor except for YaRN / LongRoPE /
+    Llama-3 types and Gemma-3 (whose limits are already scaled). A config-level
+    ``model_max_length`` can only raise the limit: vLLM accepts any length up to it.
+    Returns ``None`` when no positional field is present.
     """
     tc = resolve_text_config(config)
     if not isinstance(tc, dict):
         return None
 
     candidates: List[int] = []
-    model_max: Optional[int] = None
     for key in _MAX_LEN_KEYS:
         val = tc.get(key)
         if isinstance(val, (int, float)) and val > 0:
             candidates.append(int(val))
     mm = tc.get("model_max_length")
-    if isinstance(mm, (int, float)) and 0 < mm < 1e12:
-        model_max = int(mm)
-
-    if model_max is not None:
-        derived = model_max
-    elif candidates:
-        derived = min(candidates)
-    else:
+    model_max = int(mm) if isinstance(mm, (int, float)) and 0 < mm < 1e12 else None
+    if not candidates and model_max is None:
         return None
 
-    # vLLM keys the Gemma-3 exception on model_type, not rope_type: real Gemma-3
-    # configs carry {"rope_type": "linear", "factor": 8.0} on an already-scaled
-    # max_position_embeddings, so applying the factor would overshoot 8x.
-    model_type = f"{tc.get('model_type') or ''} {config.get('model_type') or ''}".lower()
-    is_gemma3 = "gemma3" in model_type
-
-    rope = tc.get("rope_scaling")
-    if isinstance(rope, dict) and not is_gemma3:
-        rtype = str(rope.get("rope_type") or rope.get("type") or "").lower()
-        factor = rope.get("factor")
-        orig = rope.get("original_max_position_embeddings")
-        if rtype == "yarn":
-            base = int(orig) if orig else derived
-            if isinstance(factor, (int, float)):
-                derived = int(base * factor)
-        elif rtype in ("longrope", "su"):
-            if orig:
-                derived = int(orig)
-        elif rtype == "llama3":
-            pass  # already scaled / no plain factor applied
-        elif isinstance(factor, (int, float)) and factor > 0:
+    derived: Optional[int] = None
+    if candidates:
+        derived = min(candidates)
+        model_type = f"{tc.get('model_type') or ''} {config.get('model_type') or ''}".lower()
+        if "gemma3" not in model_type:
+            factor = 1.0
+            for rp in _rope_parameter_sets(tc):
+                rtype = str(rp.get("rope_type") or rp.get("type") or "default").lower()
+                if rtype not in _ROPE_NO_FACTOR:
+                    f = rp.get("factor")
+                    if isinstance(f, (int, float)) and f > 0:
+                        factor = f
             derived = int(derived * factor)
 
+    if model_max is not None:
+        return max(derived or 0, model_max)
     return derived
 
 
