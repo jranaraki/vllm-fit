@@ -1,38 +1,149 @@
-import io
+import importlib.util
 import multiprocessing
 import os
+import re
+import signal
 import sys
+import tempfile
+import traceback
 from typing import Optional, Callable, List, Tuple
 
 
-def _test_engine_worker_cpu(
-    model_id: str,
-    max_model_len: int,
-    max_num_seqs: int,
-    enforce_eager: bool = False,
-    kv_cache_space_gb: Optional[int] = None,
-) -> int:
-    os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
-    # Size the CPU KV cache to match what we recommend, so the probe is representative.
-    if kv_cache_space_gb and kv_cache_space_gb > 0:
-        os.environ["VLLM_CPU_KVCACHE_SPACE"] = str(kv_cache_space_gb)
+# Default per-launch timeout. A launch includes weight loading and, on GPU, torch.compile
+# and CUDA-graph capture, so large models need minutes even when already downloaded.
+DEFAULT_TIMEOUT = 900
 
-    devnull = open(os.devnull, "w")
-    os.dup2(devnull.fileno(), 1)
-    os.dup2(devnull.fileno(), 2)
-    sys.stdout = devnull
-    sys.stderr = devnull
+# Failure signatures meaning "this configuration needs more memory than is available".
+# Anything else (missing package, gated repo, unsupported architecture, invalid argument)
+# can't be fixed by shrinking the configuration, so profiling stops and reports it.
+_MEMORY_ERROR_PATTERNS = [
+    r"out of memory",
+    r"OutOfMemoryError",
+    r"No available memory for the cache blocks",
+    r"larger than the available KV cache memory",
+    r"KV cache is needed",
+    r"less than desired GPU memory utilization",
+    r"Insufficient memory",
+    r"Cannot allocate memory",
+    r"VLLM_CPU_KVCACHE_SPACE",
+]
+_MEMORY_ERROR_RE = re.compile("|".join(_MEMORY_ERROR_PATTERNS), re.IGNORECASE)
 
-    from vllm import LLM
 
-    llm = LLM(
-        model=model_id,
-        max_model_len=max_model_len,
-        max_num_seqs=max_num_seqs,
-        enforce_eager=enforce_eager,
-    )
-    devnull.close()
-    return max_num_seqs
+class ProfilingAborted(Exception):
+    """A probe failed for a reason other than insufficient memory (or timed out)."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
+def _is_memory_failure(log_text: str, exitcode: Optional[int]) -> bool:
+    # Killed by SIGKILL with no Python traceback: almost always the host OOM killer.
+    if exitcode is not None and exitcode == -getattr(signal, "SIGKILL", 9):
+        return True
+    return bool(_MEMORY_ERROR_RE.search(log_text))
+
+
+def _log_tail(log_text: str, lines: int = 15) -> str:
+    return "\n".join(log_text.strip().splitlines()[-lines:])
+
+
+def check_vllm_installed() -> None:
+    if importlib.util.find_spec("vllm") is None:
+        raise ProfilingAborted(
+            "vLLM is not installed in this environment",
+            "Install it (e.g. `uv pip install vllm`) and run profiling again.",
+        )
+
+
+def _redirect_output(log_path: str) -> None:
+    # Become a process-group leader so a timeout can kill vLLM's engine and
+    # tensor-parallel worker processes along with this one.
+    if hasattr(os, "setsid"):
+        try:
+            os.setsid()
+        except OSError:
+            pass
+    log = open(log_path, "w", buffering=1)
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+    sys.stdout = log
+    sys.stderr = log
+
+
+def _build_llm(log_path: str, env: dict, **llm_kwargs) -> None:
+    _redirect_output(log_path)
+    os.environ.update(env)
+    try:
+        from vllm import LLM
+
+        LLM(**llm_kwargs)
+    except BaseException:
+        traceback.print_exc()
+        sys.stderr.flush()
+        os._exit(1)
+    sys.stdout.flush()
+    os._exit(0)
+
+
+def _kill_process_group(p) -> None:
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(p.pid, getattr(signal, "SIGKILL", 9))
+        except (ProcessLookupError, PermissionError):
+            pass
+    if p.is_alive():
+        p.kill()
+    p.join()
+
+
+def _run_probe(env: dict, llm_kwargs: dict, timeout: int) -> bool:
+    """Launch one vLLM engine in a child process.
+
+    Returns True if it started, False if it failed for lack of memory. Raises
+    ``ProfilingAborted`` on a timeout or any other failure.
+    """
+    fd, log_path = tempfile.mkstemp(prefix="vllm-fit-", suffix=".log")
+    os.close(fd)
+    ctx = multiprocessing.get_context("spawn")
+    p = ctx.Process(target=_build_llm, args=(log_path, env), kwargs=llm_kwargs)
+    try:
+        try:
+            p.start()
+            p.join(timeout=timeout)
+        except BaseException:
+            # On Ctrl-C (or any error) don't leave processes holding memory.
+            _kill_process_group(p)
+            raise
+
+        if p.is_alive():
+            _kill_process_group(p)
+            raise ProfilingAborted(
+                f"vLLM did not start within {timeout}s (result inconclusive)",
+                "The model may still be downloading or compiling. Run again once it is "
+                "cached, or raise the limit with --timeout.",
+            )
+        # Reap any engine/worker processes left in the group.
+        _kill_process_group(p)
+
+        if p.exitcode == 0:
+            return True
+
+        with open(log_path, errors="replace") as f:
+            log_text = f.read()
+        if _is_memory_failure(log_text, p.exitcode):
+            return False
+        raise ProfilingAborted(
+            f"vLLM failed for a reason other than memory (exit code {p.exitcode})",
+            _log_tail(log_text),
+        )
+    finally:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
 
 
 def _test_configuration_cpu(
@@ -40,85 +151,24 @@ def _test_configuration_cpu(
     max_model_len: int,
     max_num_seqs: int,
     enforce_eager: bool,
-    timeout: int = 600,
+    timeout: int = DEFAULT_TIMEOUT,
     kv_cache_space_gb: Optional[int] = None,
 ) -> Tuple[bool, bool]:
-    ctx = multiprocessing.get_context("spawn")
-    p = ctx.Process(
-        target=_test_engine_worker_cpu,
-        args=(
-            model_id,
-            max_model_len,
-            max_num_seqs,
-            enforce_eager,
-            kv_cache_space_gb,
+    env = {"OMP_NUM_THREADS": str(os.cpu_count() or 4)}
+    # Size the CPU KV cache to match what we recommend, so the probe is representative.
+    if kv_cache_space_gb and kv_cache_space_gb > 0:
+        env["VLLM_CPU_KVCACHE_SPACE"] = str(kv_cache_space_gb)
+    started = _run_probe(
+        env,
+        dict(
+            model=model_id,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+            enforce_eager=enforce_eager,
         ),
+        timeout,
     )
-
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    sys.stdout = io.StringIO()
-    sys.stderr = io.StringIO()
-
-    try:
-        p.start()
-        p.join(timeout=timeout)
-    except BaseException:
-        # On Ctrl-C (or any error) don't leave the child process behind.
-        if p.is_alive():
-            p.terminate()
-            p.join()
-        raise
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-
-    if p.is_alive():
-        p.terminate()
-        p.join()
-        return False, True
-
-    if p.exitcode == 0:
-        return True, False
-
-    return False, False
-
-
-def _test_engine_worker(
-    model_id: str,
-    gpu_memory_utilization: float,
-    max_model_len: int,
-    tensor_parallel_size: int,
-    max_num_seqs: int,
-    enforce_eager: bool = False,
-    gpu_ids: Optional[List[int]] = None,
-) -> int:
-    if gpu_ids:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
-
-    os.environ["NCCL_DEBUG"] = "WARN"
-    os.environ["GLOG_v"] = "3"
-    os.environ["GLOO_DEBUG"] = "WARN"
-    os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
-
-    devnull = open(os.devnull, "w")
-    os.dup2(devnull.fileno(), 1)
-    os.dup2(devnull.fileno(), 2)
-    sys.stdout = devnull
-    sys.stderr = devnull
-
-    from vllm import LLM
-
-    llm = LLM(
-        model=model_id,
-        gpu_memory_utilization=gpu_memory_utilization,
-        max_model_len=max_model_len,
-        tensor_parallel_size=tensor_parallel_size,
-        max_num_seqs=max_num_seqs,
-        enforce_eager=enforce_eager,
-    )
-    devnull.close()
-    return max_num_seqs
+    return started, False
 
 
 def _test_configuration(
@@ -129,49 +179,29 @@ def _test_configuration(
     max_num_seqs: int,
     enforce_eager: bool,
     gpu_ids: List[int],
-    timeout: int = 180,
-) -> tuple[bool, bool]:
-    ctx = multiprocessing.get_context("spawn")
-    p = ctx.Process(
-        target=_test_engine_worker,
-        args=(
-            model_id,
-            gpu_memory_utilization,
-            max_model_len,
-            tensor_parallel_size,
-            max_num_seqs,
-            enforce_eager,
-            gpu_ids,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> Tuple[bool, bool]:
+    env = {
+        "NCCL_DEBUG": "WARN",
+        "GLOG_v": "3",
+        "GLOO_DEBUG": "WARN",
+        "TORCH_CPP_LOG_LEVEL": "ERROR",
+    }
+    if gpu_ids:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+    started = _run_probe(
+        env,
+        dict(
+            model=model_id,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            tensor_parallel_size=tensor_parallel_size,
+            max_num_seqs=max_num_seqs,
+            enforce_eager=enforce_eager,
         ),
+        timeout,
     )
-
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    sys.stdout = io.StringIO()
-    sys.stderr = io.StringIO()
-
-    try:
-        p.start()
-        p.join(timeout=timeout)
-    except BaseException:
-        # On Ctrl-C (or any error) don't leave the child holding GPU memory.
-        if p.is_alive():
-            p.terminate()
-            p.join()
-        raise
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-
-    if p.is_alive():
-        p.terminate()
-        p.join()
-        return False, True  # Failed, timeout
-
-    if p.exitcode == 0:
-        return True, False  # Success, no timeout
-
-    return False, False  # Failed, no timeout
+    return started, False
 
 
 def _binary_search_max_num_seqs(
@@ -208,6 +238,7 @@ def _binary_search_max_num_seqs(
             mid,
             enforce_eager,
             gpu_ids,
+            timeout=fixed_params.get("timeout", DEFAULT_TIMEOUT),
         )
 
         if success and not timeout:
@@ -253,6 +284,7 @@ def _binary_search_max_model_len(
             max_num_seqs,
             enforce_eager,
             gpu_ids,
+            timeout=fixed_params.get("timeout", DEFAULT_TIMEOUT),
         )
 
         if success and not timeout:
@@ -268,7 +300,9 @@ def profile_parameters(
     model_id: str,
     initial_params: dict,
     progress_callback: Optional[Callable[[str], None]] = None,
+    timeout: int = DEFAULT_TIMEOUT,
 ) -> dict:
+    probe_timeout = timeout
     gpu_ids = initial_params.get("gpu_ids", [0])
     gpu_memory_utilization = initial_params["gpu_memory_utilization"]
     max_model_len = initial_params["max_model_len"]
@@ -288,6 +322,7 @@ def profile_parameters(
         total_attempts += 1
 
     try:
+        check_vllm_installed()
         _log_attempt(
             f"Mem={gpu_memory_utilization:.2f} • Len={max_model_len} • TP={tensor_parallel_size} • Seqs={max_num_seqs} • Eager={'ON' if enforce_eager else 'OFF'}"
         )
@@ -300,6 +335,7 @@ def profile_parameters(
             max_num_seqs,
             enforce_eager,
             gpu_ids,
+            timeout=probe_timeout,
         )
 
         if not success:
@@ -319,6 +355,7 @@ def profile_parameters(
                 max_num_seqs,
                 enforce_eager,
                 gpu_ids,
+                timeout=probe_timeout,
             )
 
         if not success:
@@ -366,6 +403,7 @@ def profile_parameters(
                     max_num_seqs,
                     enforce_eager,
                     gpu_ids,
+                    timeout=probe_timeout,
                 )
 
         if not success:
@@ -394,6 +432,7 @@ def profile_parameters(
             "tensor_parallel_size": tensor_parallel_size,
             "max_num_seqs": max_num_seqs,
             "enforce_eager": enforce_eager,
+            "timeout": probe_timeout,
         }
 
         max_num_seqs = _binary_search_max_num_seqs(
@@ -419,10 +458,26 @@ def profile_parameters(
             "attempts_made": total_attempts,
         }
 
+    except ProfilingAborted as exc:
+        if progress_callback:
+            progress_callback(f"[red]✗ {exc.reason}[/red]")
+        return {
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": tensor_parallel_size,
+            "max_num_seqs": max_num_seqs,
+            "enforce_eager": enforce_eager,
+            "profiling_success": False,
+            "attempts_made": total_attempts,
+            "error": exc.reason,
+            "error_detail": exc.detail,
+        }
+
     except KeyboardInterrupt:
         if progress_callback:
             progress_callback("[yellow]Profiling interrupted by user[/yellow]")
         return {
+            "interrupted": True,
             "gpu_memory_utilization": gpu_memory_utilization,
             "max_model_len": max_model_len,
             "tensor_parallel_size": tensor_parallel_size,
@@ -437,7 +492,9 @@ def profile_parameters_cpu(
     model_id: str,
     initial_params: dict,
     progress_callback: Optional[Callable[[str], None]] = None,
+    timeout: int = DEFAULT_TIMEOUT,
 ) -> dict:
+    probe_timeout = timeout
     max_model_len = initial_params["max_model_len"]
     max_num_seqs = initial_params["max_num_seqs"]
     enforce_eager = initial_params["enforce_eager"]
@@ -451,6 +508,7 @@ def profile_parameters_cpu(
             progress_callback(f"Attempt {total_attempts} • {msg}")
 
     try:
+        check_vllm_installed()
         _log_attempt(
             f"Len={max_model_len} • Seqs={max_num_seqs} • Eager={'ON' if enforce_eager else 'OFF'}"
         )
@@ -461,6 +519,7 @@ def profile_parameters_cpu(
             max_num_seqs,
             enforce_eager,
             kv_cache_space_gb=kv_cache_space_gb,
+            timeout=probe_timeout,
         )
 
         if not success and not enforce_eager:
@@ -478,6 +537,7 @@ def profile_parameters_cpu(
                 max_num_seqs,
                 enforce_eager,
                 kv_cache_space_gb=kv_cache_space_gb,
+                timeout=probe_timeout,
             )
 
         if not success:
@@ -509,6 +569,7 @@ def profile_parameters_cpu(
                     max_num_seqs,
                     enforce_eager,
                     kv_cache_space_gb=kv_cache_space_gb,
+                    timeout=probe_timeout,
                 )
 
         if not success:
@@ -531,12 +592,14 @@ def profile_parameters_cpu(
                 "[cyan]Optimizing parameters with binary search...[/cyan]"
             )
 
-        low = max(256, int(max_model_len * 0.5))
-        high = min(2048, max_model_len * 2)
+        # The baseline already works; search upward from it.
+        low = max_model_len + 1
+        high = max_model_len * 2
         best = max_model_len
 
         while low <= high:
             mid = (low + high) // 2
+            total_attempts += 1
 
             if progress_callback:
                 progress_callback(
@@ -549,6 +612,7 @@ def profile_parameters_cpu(
                 max_num_seqs,
                 enforce_eager,
                 kv_cache_space_gb=kv_cache_space_gb,
+                timeout=probe_timeout,
             )
 
             if success and not timeout:
@@ -573,10 +637,27 @@ def profile_parameters_cpu(
             "attempts_made": total_attempts,
         }
 
+    except ProfilingAborted as exc:
+        if progress_callback:
+            progress_callback(f"[red]✗ {exc.reason}[/red]")
+        return {
+            "gpu_memory_utilization": None,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": 1,
+            "max_num_seqs": max_num_seqs,
+            "enforce_eager": enforce_eager,
+            "kv_cache_space_gb": kv_cache_space_gb,
+            "profiling_success": False,
+            "attempts_made": total_attempts,
+            "error": exc.reason,
+            "error_detail": exc.detail,
+        }
+
     except KeyboardInterrupt:
         if progress_callback:
             progress_callback("[yellow]Profiling interrupted by user[/yellow]")
         return {
+            "interrupted": True,
             "gpu_memory_utilization": None,
             "max_model_len": max_model_len,
             "tensor_parallel_size": 1,

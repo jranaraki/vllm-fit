@@ -51,3 +51,17 @@ def test_printed_command_is_not_wrapped(monkeypatch):
     cmd = _format_vllm_command("org/[weird]-model", _gpu_params(), hardware_type="gpu")
     cli._print_command(cmd)
     assert buf.getvalue() == cmd + "\n"
+
+
+def test_profiling_failure_exits_nonzero():
+    import pytest
+    import typer
+
+    from vllm_fit.cli import _report_profiling_failure
+
+    with pytest.raises(typer.Exit) as exc:
+        _report_profiling_failure({"profiling_success": False, "error": "boom"}, 1.0)
+    assert exc.value.exit_code == 1
+    with pytest.raises(typer.Exit) as exc:
+        _report_profiling_failure({"profiling_success": False, "interrupted": True})
+    assert exc.value.exit_code == 130
