@@ -154,3 +154,38 @@ def test_local_dir_weights_from_safetensors_headers(tmp_path):
     assert wi.source == "local_safetensors"
     assert wi.total_params == 1_000_000 + 1000 + 1000
     assert wi.weights_bytes == 1_000_000 * 2 + 1000 * 2 + 1000 * 4
+
+
+def test_mtp_layers_excluded(monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm_fit.params import _from_safetensors_metadata, _is_unloaded_mtp
+
+    t = lambda dt, n: SimpleNamespace(dtype=dt, parameter_count=n)
+    files = {
+        "a.safetensors": SimpleNamespace(tensors={
+            "model.layers.0.mlp.weight": t("BF16", 1000),
+            "model.layers.45.mlp.weight": t("BF16", 1000),
+            "model.layers.46.mlp.weight": t("BF16", 500),       # MTP layer
+            "mtp.fc.weight": t("BF16", 200),                    # Qwen3-Next style
+            "model.vision_tower.layers.60.weight": t("BF16", 7), # vision, not text stack
+        }),
+    }
+    meta = SimpleNamespace(files_metadata=files, parameter_count={"BF16": 2707})
+    fake = types.ModuleType("huggingface_hub")
+    fake.get_safetensors_metadata = lambda repo_id: meta
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake)
+
+    wi = _from_safetensors_metadata("org/model", {"num_hidden_layers": 46})
+    assert wi.total_params == 2007
+    assert wi.weights_bytes == 2007 * 2
+    assert not _is_unloaded_mtp("model.layers.45.x", 46)
+    assert _is_unloaded_mtp("model.language_model.layers.46.x", 46)
+
+
+def test_local_dir_skips_mtp_layers(tmp_path):
+    _write_safetensors(tmp_path / "model.safetensors",
+                       {"model.layers.0.w": ("BF16", [100]),
+                        "model.layers.2.w": ("BF16", [50])})  # MTP layer past num_hidden_layers
+    wi = resolve_weights(str(tmp_path), {"num_hidden_layers": 2})
+    assert wi.total_params == 100

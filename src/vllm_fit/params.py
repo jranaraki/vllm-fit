@@ -22,6 +22,7 @@ network rungs raise and are caught, so the ladder degrades cleanly to ``None``.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -65,7 +66,34 @@ class WeightInfo:
         return None
 
 
-def _from_safetensors_metadata(repo_id: str) -> Optional[WeightInfo]:
+# Text-stack layer tensors. Only these prefixes are matched, so vision-tower layers
+# (with their own numbering) are never mistaken for extra decoder layers.
+_TEXT_LAYER_RE = re.compile(
+    r"^(?:model\.|language_model\.model\.|model\.language_model\.)layers\.(\d+)\."
+)
+
+
+def _is_unloaded_mtp(name: str, num_layers: Optional[int]) -> bool:
+    """Multi-token-prediction weights that vLLM only loads for speculative decoding:
+    decoder layers past ``num_hidden_layers`` (DeepSeek-V3, GLM-4.5) or ``mtp.*``
+    modules (Qwen3-Next)."""
+    if name.startswith("mtp."):
+        return True
+    if num_layers:
+        m = _TEXT_LAYER_RE.match(name)
+        if m and int(m.group(1)) >= num_layers:
+            return True
+    return False
+
+
+def _num_layers(config: dict) -> Optional[int]:
+    from .config_resolver import get_field, resolve_text_config
+
+    n = get_field(resolve_text_config(config or {}), "num_hidden_layers")
+    return int(n) if n else None
+
+
+def _from_safetensors_metadata(repo_id: str, config: Optional[dict] = None) -> Optional[WeightInfo]:
     try:
         from huggingface_hub import get_safetensors_metadata
     except Exception:
@@ -75,7 +103,20 @@ def _from_safetensors_metadata(repo_id: str) -> Optional[WeightInfo]:
     except Exception:
         return None
 
-    per_dtype = dict(getattr(meta, "parameter_count", {}) or {})
+    per_dtype: Dict[str, int] = {}
+    files = getattr(meta, "files_metadata", None)
+    if isinstance(files, dict) and files:
+        num_layers = _num_layers(config or {})
+        for file_meta in files.values():
+            for name, tensor in (getattr(file_meta, "tensors", None) or {}).items():
+                if _is_unloaded_mtp(name, num_layers):
+                    continue
+                dtype = str(getattr(tensor, "dtype", ""))
+                per_dtype[dtype] = per_dtype.get(dtype, 0) + int(
+                    getattr(tensor, "parameter_count", 0) or 0
+                )
+    if not per_dtype:
+        per_dtype = dict(getattr(meta, "parameter_count", {}) or {})
     if not per_dtype:
         return None
     total = int(sum(per_dtype.values()))
@@ -146,7 +187,7 @@ def _from_config(config: dict) -> Optional[WeightInfo]:
     return None
 
 
-def _from_local_dir(path: str) -> Optional[WeightInfo]:
+def _from_local_dir(path: str, config: Optional[dict] = None) -> Optional[WeightInfo]:
     """Per-dtype counts read from the safetensors headers of a local model directory."""
     import glob
     import os
@@ -158,6 +199,7 @@ def _from_local_dir(path: str) -> Optional[WeightInfo]:
     if len(files) > 1:
         files = [f for f in files if not os.path.basename(f).startswith("consolidated")] or files
     per_dtype: Dict[str, int] = {}
+    num_layers = _num_layers(config or {})
     try:
         for name in files:
             with open(name, "rb") as f:
@@ -165,6 +207,8 @@ def _from_local_dir(path: str) -> Optional[WeightInfo]:
                 header = json.loads(f.read(header_len))
             for key, tensor in header.items():
                 if key == "__metadata__" or not isinstance(tensor, dict):
+                    continue
+                if _is_unloaded_mtp(key, num_layers):
                     continue
                 count = 1
                 for dim in tensor.get("shape", []):
@@ -189,9 +233,9 @@ def resolve_weights(repo_id: str, config: dict) -> Optional[WeightInfo]:
     import os
 
     if os.path.isdir(repo_id):
-        return _from_local_dir(repo_id) or _from_config(config)
+        return _from_local_dir(repo_id, config) or _from_config(config)
     for rung in (
-        lambda: _from_safetensors_metadata(repo_id),
+        lambda: _from_safetensors_metadata(repo_id, config),
         lambda: _from_safetensors_index(repo_id),
         lambda: _from_model_info(repo_id),
         lambda: _from_config(config),
