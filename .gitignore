@@ -5,3 +5,5 @@
 design.md
 src/vllm_fit/__pycache__
 dist
+__pycache__/
+.coverage
