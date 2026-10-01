@@ -30,7 +30,6 @@ _LOOKUP_ERRORS = (
     EntryNotFoundError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
-    GatedRepoError,
     HFValidationError,
     # Offline + not-in-cache: treat as a clean miss so we fall through to the
     # actionable ValueError rather than leaking a raw traceback.
@@ -98,8 +97,28 @@ def gguf_repo_has_config(repo_id: str) -> bool:
             force_download=False,
         )
         return True
-    except _LOOKUP_ERRORS:
+    except _LOOKUP_ERRORS + (GatedRepoError,):
         return False
+
+
+def _gated_error(model_id: str, repo_id: str) -> ValueError:
+    token_hint = (
+        "HF_TOKEN is set but its account doesn't have access yet."
+        if os.environ.get("HF_TOKEN")
+        else "Then set HF_TOKEN or run `hf auth login`."
+    )
+    return ValueError(
+        f"Model '{model_id}' is gated: accept its license at "
+        f"https://huggingface.co/{repo_id} with your HuggingFace account. {token_hint}"
+    )
+
+
+def _local_model_config(path: str) -> Tuple[Dict[str, Any], str]:
+    """config.json from a local model directory (vLLM accepts `vllm serve /path`)."""
+    config = _load_config_json(os.path.join(path, "config.json"))
+    if config is None:
+        raise ValueError(f"No readable config.json in local model directory '{path}'.")
+    return config, path
 
 
 def _load_config_json(config_path: str) -> Optional[Dict[str, Any]]:
@@ -117,7 +136,11 @@ def _load_config_json(config_path: str) -> Optional[Dict[str, Any]]:
 
 
 def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
+    if os.path.isdir(model_id):
+        return _local_model_config(model_id)
+
     repo_id = extract_repo_id(model_id)
+    gated: Optional[str] = None
 
     if is_gguf_model(model_id):
         has_config = gguf_repo_has_config(repo_id)
@@ -129,6 +152,9 @@ def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
                     filename="config.json",
                     force_download=False,
                 )
+            except GatedRepoError:
+                gated = gated or candidate
+                continue
             except _LOOKUP_ERRORS:
                 continue
             config = _load_config_json(config_path)
@@ -149,11 +175,17 @@ def get_model_config(model_id: str) -> Tuple[Dict[str, Any], str]:
                 filename="config.json",
                 force_download=False,
             )
+        except GatedRepoError:
+            gated = gated or candidate
+            continue
         except _LOOKUP_ERRORS:
             continue
         config = _load_config_json(config_path)
         if config is not None:
             return config, candidate
+
+    if gated:
+        raise _gated_error(model_id, gated)
 
     offline = os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE")
     offline_hint = (
