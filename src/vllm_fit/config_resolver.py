@@ -351,6 +351,31 @@ def attention_layout(config: Dict[str, Any], num_layers: int) -> AttentionLayout
     return AttentionLayout(num_layers)
 
 
+def recurrent_state_layer_count(
+    config: Dict[str, Any], num_layers: int, layout: AttentionLayout
+) -> int:
+    """Number of Mamba / linear-attention layers, which keep a fixed-size state per
+    request instead of per-token KV. Zero for pure-attention models."""
+    tc = resolve_text_config(config)
+    if not isinstance(tc, dict) or not num_layers:
+        return 0
+    hybrid = tc.get("hybrid_override_pattern")
+    if isinstance(hybrid, str) and hybrid:
+        return hybrid.count("M")
+    for key in ("layer_types", "layers_block_type"):
+        types = tc.get(key)
+        if isinstance(types, list) and types:
+            return sum(
+                1 for t in types if str(t).lower() in ("mamba", "linear_attention", "mamba2")
+            )
+    is_recurrent = any(
+        k in tc for k in ("mamba_d_state", "ssm_state_size", "mamba_state_dim", "linear_num_value_heads")
+    )
+    if not is_recurrent:
+        return 0
+    return max(0, num_layers - layout.full_layers - layout.sliding_layers)
+
+
 def full_attention_layer_count(config: Dict[str, Any], num_layers: int) -> int:
     """Number of layers that keep KV for the whole sequence."""
     return attention_layout(config, num_layers).full_layers
