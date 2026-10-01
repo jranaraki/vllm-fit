@@ -410,6 +410,14 @@ def _recurrent_state_bytes(
     return layers * (conv + ssm) / tp
 
 
+# vLLM allocates KV in pages of this many tokens (default block size on GPU and CPU).
+KV_BLOCK_SIZE = 16
+
+
+def _blocks(tokens: int) -> int:
+    return -(-tokens // KV_BLOCK_SIZE)
+
+
 def _kv_bytes_per_request(
     layout: AttentionLayout,
     per_layer_token: float,
@@ -423,12 +431,20 @@ def _kv_bytes_per_request(
     the tokens scheduled in one step, as in vLLM's SlidingWindowSpec. Mamba /
     linear-attention layers add a fixed ``state_bytes`` regardless of length.
     """
-    sliding_span = max_model_len
+    full_span = _blocks(max_model_len)
+    sliding_span = full_span
     if layout.sliding_layers and layout.window:
-        sliding_span = min(max_model_len, layout.window + batched_tokens)
-    return state_bytes + per_layer_token * (
-        layout.full_layers * max_model_len + layout.sliding_layers * sliding_span
+        # SlidingWindowSpec: the window plus one step, in whole blocks, plus one block.
+        sliding_span = _blocks(min(max_model_len, layout.window - 1 + batched_tokens)) + 1
+    return state_bytes + KV_BLOCK_SIZE * per_layer_token * (
+        layout.full_layers * full_span + layout.sliding_layers * sliding_span
     )
+
+
+def _kv_pool_bytes(layout: AttentionLayout, per_layer_token: float, usable_bytes: float) -> float:
+    """KV memory requests can use: vLLM reserves one null block in every layer."""
+    reserved = KV_BLOCK_SIZE * per_layer_token * (layout.full_layers + layout.sliding_layers)
+    return max(0.0, usable_bytes - reserved)
 
 
 def _largest_fitting_len(
@@ -503,7 +519,7 @@ def estimate_parameters_cpu(
     request_bytes = lambda n: max(
         1.0, _kv_bytes_per_request(layout, per_layer_token, n, n, state_bytes)
     )
-    kv_budget_bytes = kv_cache_space_gb * (1024**3)
+    kv_budget_bytes = _kv_pool_bytes(layout, per_layer_token, kv_cache_space_gb * (1024**3))
 
     len_cap = min(derive_max_model_len(config) or PRACTICAL_CPU_LEN_CAP, PRACTICAL_CPU_LEN_CAP)
     max_model_len = _largest_fitting_len(kv_budget_bytes, len_cap, 256, request_bytes) or 256
@@ -677,7 +693,9 @@ def estimate_parameters(
         non_kv_per_gpu = per_gpu_weights + activation_peak_gb + non_torch_gb + cudagraph_gb
         usable_for_kv_gb = requested_gb - non_kv_per_gpu
 
-        kv_budget_bytes = max(0.0, usable_for_kv_gb) * (1024**3)
+        kv_budget_bytes = _kv_pool_bytes(
+            layout, per_layer_token, max(0.0, usable_for_kv_gb) * (1024**3)
+        )
 
         # Longest context one request can use, then how many such requests fit at once.
         fitting_len = _largest_fitting_len(kv_budget_bytes, absolute_cap, 256, request_bytes)
