@@ -18,6 +18,9 @@ from .config_resolver import (
 # memory covers gpu_memory_utilization x total.
 _CUDA_CONTEXT_GB = 0.5
 
+# Memory an otherwise idle GPU reports as used (driver/ECC reservations).
+_IDLE_GPU_USED_GB = 0.75
+
 
 def is_gguf_model(model_id: str) -> bool:
     """Check if model is a GGUF model by looking for GGUF suffix or quantization patterns."""
@@ -573,10 +576,14 @@ def estimate_parameters(
         free_cap = math.floor((free_vram - _CUDA_CONTEXT_GB) / per_gpu_vram * 100) / 100
         if free_cap < gpu_memory_utilization:
             gpu_memory_utilization = max(0.0, free_cap)
-            warnings.append(
-                f"{per_gpu_vram - free_vram:.1f} GB of GPU memory is already in use by other "
-                f"processes; gpu_memory_utilization lowered to {gpu_memory_utilization:.2f}"
-            )
+            # An idle GPU still reports a few hundred MB used (driver reservations);
+            # only call it out when another process is plausibly holding memory.
+            if per_gpu_vram - free_vram > _IDLE_GPU_USED_GB:
+                warnings.append(
+                    f"{per_gpu_vram - free_vram:.1f} GB of GPU memory is already in use by "
+                    f"other processes; gpu_memory_utilization lowered to "
+                    f"{gpu_memory_utilization:.2f}"
+                )
     requested_gb = gpu_memory_utilization * per_gpu_vram
 
     # These don't depend on the CUDA-graph lever.
