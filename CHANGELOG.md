@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.5 (2026-10-01)
+
+### Bug Fixes
+
+- Cost float32 weights at vLLM's 16-bit serving size
+  ([`d5b5b39`](https://github.com/jranaraki/vllm-fit/commit/d5b5b39c6046328a5164c5c83c2ef92aaf6637af))
+
+
 ## v0.5.4 (2026-10-01)
 
 ### Bug Fixes
