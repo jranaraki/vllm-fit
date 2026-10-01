@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.1 (2026-10-01)
+
+### Bug Fixes
+
+- **config**: Don't apply Gemma-3 rope factor to max_model_len
+  ([`e59cb21`](https://github.com/jranaraki/vllm-fit/commit/e59cb2168d51ddab6b936a8c87ebebe1b1f742eb))
+
+
 ## v0.5.0 (2026-09-09)
 
 ### Features
