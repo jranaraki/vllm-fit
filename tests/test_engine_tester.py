@@ -130,3 +130,30 @@ def test_profile_threads_config_repo_to_every_probe(monkeypatch):
     monkeypatch.setattr(et, "_test_configuration", fake)
     et.profile_parameters("org/model-GGUF:Q4_K_M", _gpu_initial(), config_repo_id="org/model")
     assert repos and set(repos) == {"org/model"}
+
+
+def test_length_search_never_exceeds_model_limit(monkeypatch):
+    # Qwen3-0.6B: vLLM rejects max_model_len > 40960 with a non-memory error.
+    monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    tried = []
+
+    def fake(model, util, length, tp, seqs, eager, gpu_ids, **kw):
+        tried.append(length)
+        if length > 40960:
+            raise ProfilingAborted("vLLM failed for a reason other than memory")
+        return True, False
+
+    monkeypatch.setattr(et, "_test_configuration", fake)
+    res = et.profile_parameters("Qwen/Qwen3-0.6B", {**_gpu_initial(), "max_model_len": 40960},
+                                max_len_cap=40960)
+    assert res["profiling_success"] is True
+    assert max(tried) <= 40960 and res["max_model_len"] == 40960
+
+
+def test_cpu_length_search_respects_model_limit(monkeypatch):
+    monkeypatch.setattr(et, "check_vllm_installed", lambda: None)
+    tried = []
+    monkeypatch.setattr(et, "_test_configuration_cpu",
+                        lambda model, length, seqs, eager, **kw: (tried.append(length) or True, False))
+    res = et.profile_parameters_cpu("org/model", _cpu_initial(3000), max_len_cap=4096)
+    assert max(tried) <= 4096 and res["max_model_len"] == 4096

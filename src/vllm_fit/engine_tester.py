@@ -281,6 +281,9 @@ def _binary_search_max_model_len(
 
     low = fixed_params["max_model_len"]
     high = max(32768, fixed_params["max_model_len"] * 2)
+    # vLLM rejects lengths above the model's own limit outright (not a memory failure).
+    if fixed_params.get("max_len_cap"):
+        high = min(high, fixed_params["max_len_cap"])
     best = fixed_params["max_model_len"]
 
     while low <= high:
@@ -320,6 +323,7 @@ def profile_parameters(
     progress_callback: Optional[Callable[[str], None]] = None,
     timeout: int = DEFAULT_TIMEOUT,
     config_repo_id: Optional[str] = None,
+    max_len_cap: Optional[int] = None,
 ) -> dict:
     probe_timeout = timeout
     gpu_ids = initial_params.get("gpu_ids", [0])
@@ -456,6 +460,7 @@ def profile_parameters(
             "enforce_eager": enforce_eager,
             "timeout": probe_timeout,
             "config_repo_id": config_repo_id,
+            "max_len_cap": max_len_cap,
         }
 
         max_num_seqs = _binary_search_max_num_seqs(
@@ -517,6 +522,7 @@ def profile_parameters_cpu(
     progress_callback: Optional[Callable[[str], None]] = None,
     timeout: int = DEFAULT_TIMEOUT,
     config_repo_id: Optional[str] = None,
+    max_len_cap: Optional[int] = None,
 ) -> dict:
     probe_timeout = timeout
     max_model_len = initial_params["max_model_len"]
@@ -622,6 +628,8 @@ def profile_parameters_cpu(
         # The baseline already works; search upward from it.
         low = max_model_len + 1
         high = max_model_len * 2
+        if max_len_cap:
+            high = min(high, max_len_cap)
         best = max_model_len
 
         while low <= high:
