@@ -493,3 +493,53 @@ def test_idle_gpu_reservation_caps_without_warning():
     res = estimate_parameters(cfg, total_vram=4.0, weight_info=wi, free_vram=3.7)
     assert res["gpu_memory_utilization"] * 4.0 <= 3.7 - 0.5
     assert not any("already in use" in w for w in res["warnings"])
+
+
+def test_recurrent_state_mamba2_nemotron_shape():
+    from vllm_fit.config_resolver import attention_layout
+    from vllm_fit.estimator import _recurrent_state_bytes
+
+    pattern = "M-M-M-MM-M-M-M*-M-M-M*-M-M-M-M*-M-M-M-M*-M-MM-M-M-M-M-M-"
+    cfg = {"hidden_size": 4480, "num_hidden_layers": 56, "hybrid_override_pattern": pattern,
+           "mamba_num_heads": 128, "mamba_head_dim": 80, "ssm_state_size": 128,
+           "n_groups": 8, "conv_kernel": 4}
+    layout = attention_layout(cfg, 56)
+    per_layer = 3 * (128 * 80 + 2 * 8 * 128) * 2 + 128 * 80 * 128 * 2
+    assert _recurrent_state_bytes(cfg, 56, layout) == pattern.count("M") * per_layer
+    assert _recurrent_state_bytes(cfg, 56, layout, tensor_parallel_size=2) == pattern.count("M") * per_layer / 2
+
+
+def test_recurrent_state_gated_deltanet_qwen3_next_shape():
+    from vllm_fit.config_resolver import attention_layout
+    from vllm_fit.estimator import _recurrent_state_bytes
+
+    cfg = {"hidden_size": 2048, "num_hidden_layers": 48, "full_attention_interval": 4,
+           "linear_num_value_heads": 32, "linear_num_key_heads": 16,
+           "linear_key_head_dim": 128, "linear_value_head_dim": 128,
+           "linear_conv_kernel_dim": 4}
+    layout = attention_layout(cfg, 48)
+    per_layer = (2 * 16 * 128 + 32 * 128) * 3 * 2 + 32 * 128 * 128 * 2
+    assert _recurrent_state_bytes(cfg, 48, layout) == 36 * per_layer
+
+
+def test_pure_attention_has_no_recurrent_state():
+    from vllm_fit.config_resolver import attention_layout
+    from vllm_fit.estimator import _recurrent_state_bytes
+
+    cfg = {"hidden_size": 4096, "num_hidden_layers": 32}
+    assert _recurrent_state_bytes(cfg, 32, attention_layout(cfg, 32)) == 0.0
+
+
+def test_recurrent_state_reduces_concurrency():
+    # A short-context hybrid model: per-request state, not KV, dominates.
+    base = {"hidden_size": 4096, "num_hidden_layers": 40, "num_attention_heads": 32,
+            "num_key_value_heads": 8, "vocab_size": 100352, "intermediate_size": 8192,
+            "max_position_embeddings": 2048,
+            "layer_types": ["attention"] * 4 + ["mamba"] * 36}
+    mamba = {**base, "mamba_n_heads": 128, "mamba_d_head": 64, "mamba_d_state": 128,
+             "mamba_n_groups": 1, "mamba_d_conv": 4}
+    wi = WeightInfo(source="test", weights_bytes=int(8 * 1024**3))
+    no_state = estimate_parameters({**base, "layer_types": ["attention"] * 4 + ["other"] * 36},
+                                   total_vram=24.0, weight_info=wi)
+    with_state = estimate_parameters(mamba, total_vram=24.0, weight_info=wi)
+    assert with_state["max_num_seqs"] < no_state["max_num_seqs"]

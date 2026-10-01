@@ -10,6 +10,7 @@ from .config_resolver import (
     detect_mla,
     AttentionLayout,
     attention_layout,
+    recurrent_state_layer_count,
     crosscheck_with_transformers,
 )
 
@@ -356,18 +357,76 @@ def _kv_bytes_per_layer_token(
     return 2 * kv_heads_per_gpu * head_dim * kv_dtype_bytes
 
 
+def _recurrent_state_bytes(
+    config: Dict[str, Any],
+    num_layers: int,
+    layout: AttentionLayout,
+    tensor_parallel_size: int = 1,
+    dtype_bytes: int = 2,
+) -> float:
+    """Fixed per-request state of Mamba / linear-attention layers on one GPU.
+
+    Shapes follow vLLM's MambaStateShapeCalculator: a short convolution state plus the
+    recurrent (SSM / delta-rule) state, both sharded across tensor-parallel ranks.
+    """
+    layers = recurrent_state_layer_count(config, num_layers, layout)
+    if not layers:
+        return 0.0
+    tc = resolve_text_config(config)
+    tp = max(1, tensor_parallel_size)
+
+    def first(*keys):
+        for k in keys:
+            v = tc.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
+        return None
+
+    hidden = first("hidden_size") or 0
+    ssm_bytes = 4 if str(tc.get("mamba_ssm_dtype", "")).lower() == "float32" else dtype_bytes
+
+    if first("linear_num_value_heads"):  # Gated DeltaNet (Qwen3-Next, Qwen3.5)
+        v_heads = first("linear_num_value_heads")
+        k_heads = first("linear_num_key_heads") or v_heads
+        k_dim = first("linear_key_head_dim") or 128
+        v_dim = first("linear_value_head_dim") or 128
+        kernel = first("linear_conv_kernel_dim") or 4
+        conv = (2 * k_heads * k_dim + v_heads * v_dim) * (kernel - 1) * dtype_bytes
+        ssm = v_heads * k_dim * v_dim * ssm_bytes
+    else:
+        d_state = first("ssm_state_size", "mamba_d_state", "mamba_state_dim") or 128
+        kernel = first("conv_kernel", "mamba_d_conv") or 4
+        heads = first("mamba_num_heads", "mamba_n_heads")
+        head_dim = first("mamba_head_dim", "mamba_d_head")
+        if heads and head_dim:  # Mamba-2
+            groups = first("n_groups", "mamba_n_groups", "mamba_num_groups") or 1
+            inner = heads * head_dim
+            conv = (kernel - 1) * (inner + 2 * groups * d_state) * dtype_bytes
+            ssm = heads * head_dim * d_state * ssm_bytes
+        else:  # Mamba-1
+            inner = (first("mamba_expand") or 2) * hidden
+            conv = inner * (kernel - 1) * dtype_bytes
+            ssm = inner * d_state * ssm_bytes
+    return layers * (conv + ssm) / tp
+
+
 def _kv_bytes_per_request(
-    layout: AttentionLayout, per_layer_token: float, max_model_len: int, batched_tokens: int
+    layout: AttentionLayout,
+    per_layer_token: float,
+    max_model_len: int,
+    batched_tokens: int,
+    state_bytes: float = 0.0,
 ) -> float:
     """KV memory one request of ``max_model_len`` tokens needs.
 
     Full layers hold every token. Sliding-window layers hold at most the window plus
-    the tokens scheduled in one step, as in vLLM's SlidingWindowSpec.
+    the tokens scheduled in one step, as in vLLM's SlidingWindowSpec. Mamba /
+    linear-attention layers add a fixed ``state_bytes`` regardless of length.
     """
     sliding_span = max_model_len
     if layout.sliding_layers and layout.window:
         sliding_span = min(max_model_len, layout.window + batched_tokens)
-    return per_layer_token * (
+    return state_bytes + per_layer_token * (
         layout.full_layers * max_model_len + layout.sliding_layers * sliding_span
     )
 
@@ -440,7 +499,10 @@ def estimate_parameters_cpu(
     layout = attention_layout(config, num_layers)
     per_layer_token = _kv_bytes_per_layer_token(config, num_kv_heads, head_dim)
     # CPU commands pin max_num_batched_tokens to max_model_len.
-    request_bytes = lambda n: max(1.0, _kv_bytes_per_request(layout, per_layer_token, n, n))
+    state_bytes = _recurrent_state_bytes(config, num_layers, layout)
+    request_bytes = lambda n: max(
+        1.0, _kv_bytes_per_request(layout, per_layer_token, n, n, state_bytes)
+    )
     kv_budget_bytes = kv_cache_space_gb * (1024**3)
 
     len_cap = min(derive_max_model_len(config) or PRACTICAL_CPU_LEN_CAP, PRACTICAL_CPU_LEN_CAP)
@@ -599,7 +661,12 @@ def estimate_parameters(
     per_layer_token = _kv_bytes_per_layer_token(
         config, num_kv_heads, head_dim, tensor_parallel_size, kv_dtype_bytes
     )
-    request_bytes = lambda n: _kv_bytes_per_request(layout, per_layer_token, n, batched_tokens)
+    state_bytes = _recurrent_state_bytes(
+        config, num_layers, layout, tensor_parallel_size, kv_dtype_bytes
+    )
+    request_bytes = lambda n: _kv_bytes_per_request(
+        layout, per_layer_token, n, batched_tokens, state_bytes
+    )
 
     derived_cap = derive_max_model_len(config)
     absolute_cap = derived_cap if derived_cap else 131072
