@@ -63,6 +63,15 @@ Use `--gpuid` to control which GPUs are used:
 - `--gpuid 0,1,2` - Use GPUs 0, 1, and 2
 - `--gpuid all` (default) - Use all available GPUs
 
+GPU numbers are NVML indices (PCI bus order). If `CUDA_VISIBLE_DEVICES` is already set
+(e.g. by Slurm or Kubernetes), only those GPUs are considered, and `serve`/`profile`
+never launch on GPUs outside it.
+
+### Local models
+
+`<model_id>` can also be a local model directory (as with `vllm serve /path/to/model`);
+its `config.json` and safetensors headers are read directly.
+
 ### Device and timeout
 
 - `--device auto` (default) sizes for NVIDIA GPUs when they're visible and for vLLM's
@@ -115,11 +124,13 @@ max_num_seqs: 1
 estimated_weights_memory_gb: 1.4
 
 Run this command:
-vllm serve Qwen/Qwen3-0.6B --gpu_memory_utilization 0.8 --tensor_parallel_size 1 --max_model_len 4680 --max_num_seqs 1
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-0.6B --gpu_memory_utilization 0.8 --tensor_parallel_size 1 --max_model_len 4680 --max_num_seqs 1
 ```
 
 `gpu_memory_utilization` is below 0.9 here because an idle 4 GB card has ~3.7 GB free,
 and vLLM refuses to start unless free memory covers `utilization × total`.
+The `CUDA_*` prefix pins the command to the GPUs that were sized (NVML and CUDA
+number GPUs differently unless `CUDA_DEVICE_ORDER=PCI_BUS_ID` is set).
 `max_num_seqs` is the number of requests that can each use the full `max_model_len`
 at the same time (see [How the estimate works](#how-the-estimate-works)).
 
@@ -148,7 +159,13 @@ at the same time (see [How the estimate works](#how-the-estimate-works)).
 1. Check `nvidia-smi` shows your GPU. The error includes NVML's message (e.g. a
    driver/library version mismatch after an update usually needs a reboot).
 2. In a container, make sure it was started with GPU access (`--gpus all`).
-3. To size for the CPU backend anyway, pass `--device cpu`.
+3. If `CUDA_VISIBLE_DEVICES` is set, make sure it names GPUs that exist.
+4. To size for the CPU backend anyway, pass `--device cpu`.
+
+### Gated models
+
+For gated repos (e.g. `meta-llama/*`), accept the license on the model's HuggingFace
+page, then set `HF_TOKEN` or run `hf auth login`.
 
 ### CPU mode not working?
 
@@ -179,7 +196,7 @@ Try:
 
 ## How It Works
 
-1. **Fetches the model config** from Hugging Face and the
+1. **Fetches the model config** from Hugging Face (or a local directory) and the
    exact checkpoint size from its safetensors headers, without downloading weights.
 2. **Detects hardware**: total and free memory per GPU via NVML, or system RAM for
    the CPU backend.
@@ -197,8 +214,11 @@ startup log (`Model loading took … GiB`, `GPU KV cache size: … tokens`) when
 
 - **Weights** come from the checkpoint's safetensors headers when the Hub (or local
   cache) is reachable. Float32 tensors are counted at the 16-bit size vLLM serves them
-  in. GGUF models are sized from the quant tag's bits per weight. Offline, an analytic
+  in, and multi-token-prediction layers that vLLM only loads for speculative decoding
+  are excluded. GGUF models are sized from the quant tag's bits per weight. Offline, an analytic
   parameter count is used and a warning says so.
+- **Max context** follows vLLM's own derivation (RoPE scaling rules for YaRN,
+  LongRoPE, Llama-3 and Gemma-3).
 - **Utilization** is capped at 0.90, at `total − max(0.4 GB, 5%)`, and at
   `(free − 0.5 GB) / total` on the busiest selected GPU (vLLM's startup check).
   With mixed GPUs, every GPU is sized as the smallest one.
