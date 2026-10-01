@@ -107,11 +107,29 @@ def test_max_len_longrope_uses_original():
 
 
 def test_max_len_gemma3_no_plain_factor():
+    # Shape of google/gemma-3-27b-it: linear factor 8 on an already-scaled limit.
     cfg = {
-        "max_position_embeddings": 8192,
-        "rope_scaling": {"rope_type": "gemma3", "factor": 8.0},
+        "model_type": "gemma3",
+        "text_config": {
+            "model_type": "gemma3_text",
+            "hidden_size": 5376,
+            "num_hidden_layers": 62,
+            "num_attention_heads": 32,
+            "max_position_embeddings": 131072,
+            "rope_scaling": {"rope_type": "linear", "factor": 8.0},
+        },
     }
-    assert derive_max_model_len(cfg) == 8192
+    assert derive_max_model_len(cfg) == 131072
+
+
+def test_max_len_gemma3_text_only():
+    # Shape of google/gemma-3-1b-it: flat config, model_type gemma3_text.
+    cfg = {
+        "model_type": "gemma3_text",
+        "max_position_embeddings": 32768,
+        "rope_scaling": {"rope_type": "linear", "factor": 8.0},
+    }
+    assert derive_max_model_len(cfg) == 32768
 
 
 def test_max_len_linear_factor():

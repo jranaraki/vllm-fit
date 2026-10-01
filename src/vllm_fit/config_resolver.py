@@ -204,8 +204,14 @@ def derive_max_model_len(config: Dict[str, Any]) -> Optional[int]:
     else:
         return None
 
+    # vLLM keys the Gemma-3 exception on model_type, not rope_type: real Gemma-3
+    # configs carry {"rope_type": "linear", "factor": 8.0} on an already-scaled
+    # max_position_embeddings, so applying the factor would overshoot 8x.
+    model_type = f"{tc.get('model_type') or ''} {config.get('model_type') or ''}".lower()
+    is_gemma3 = "gemma3" in model_type
+
     rope = tc.get("rope_scaling")
-    if isinstance(rope, dict):
+    if isinstance(rope, dict) and not is_gemma3:
         rtype = str(rope.get("rope_type") or rope.get("type") or "").lower()
         factor = rope.get("factor")
         orig = rope.get("original_max_position_embeddings")
@@ -216,7 +222,7 @@ def derive_max_model_len(config: Dict[str, Any]) -> Optional[int]:
         elif rtype in ("longrope", "su"):
             if orig:
                 derived = int(orig)
-        elif rtype in ("gemma3", "llama3"):
+        elif rtype == "llama3":
             pass  # already scaled / no plain factor applied
         elif isinstance(factor, (int, float)) and factor > 0:
             derived = int(derived * factor)
