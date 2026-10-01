@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.9 (2026-10-01)
+
+### Bug Fixes
+
+- **estimator**: Model sliding-window and hybrid layers per request
+  ([`4136d0d`](https://github.com/jranaraki/vllm-fit/commit/4136d0d86e5f34aa1b2c715e4cbf4d051fd410e7))
+
+
 ## v0.5.8 (2026-10-01)
 
 ### Bug Fixes
