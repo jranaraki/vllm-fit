@@ -438,3 +438,16 @@ def test_busy_gpu_cannot_fit_when_free_memory_too_small():
     wi = WeightInfo(source="test", weights_bytes=int(14 * 1024**3))
     res = estimate_parameters(cfg, total_vram=24.0, weight_info=wi, free_vram=10.0)
     assert res["can_fit"] is False
+
+
+def test_activation_sized_for_vllm_serve_default_batch():
+    from vllm_fit.estimator import _serve_default_batched_tokens
+
+    assert _serve_default_batched_tokens(24.0) == 2048
+    assert _serve_default_batched_tokens(79.6) == 8192   # H100 80GB
+    assert _serve_default_batched_tokens(178.0) == 16384  # B200
+    cfg = {"hidden_size": 8192, "num_hidden_layers": 80, "num_attention_heads": 64,
+           "num_key_value_heads": 8, "vocab_size": 128256, "intermediate_size": 28672}
+    small = estimate_parameters(cfg, total_vram=48.0 * 4, num_gpus=4)
+    big = estimate_parameters(cfg, total_vram=79.6 * 4, num_gpus=4)
+    assert big["activation_memory_gb"] > small["activation_memory_gb"] * 3
