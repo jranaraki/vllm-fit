@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.10 (2026-10-01)
+
+### Bug Fixes
+
+- **hardware**: Don't silently fall back to CPU when GPUs can't be sized
+  ([`829f96c`](https://github.com/jranaraki/vllm-fit/commit/829f96c1f65c33e6b8d282dd7d8bc0e264291680))
+
+
 ## v0.5.9 (2026-10-01)
 
 ### Bug Fixes
