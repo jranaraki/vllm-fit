@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 
@@ -128,3 +129,28 @@ def test_ladder_returns_none_when_nothing_available():
             sys.modules["huggingface_hub"] = saved
         else:
             sys.modules.pop("huggingface_hub", None)
+
+
+def _write_safetensors(path, tensors):
+    import struct
+
+    header = {name: {"dtype": dt, "shape": shape, "data_offsets": [0, 0]}
+              for name, (dt, shape) in tensors.items()}
+    header["__metadata__"] = {"format": "pt"}
+    raw = json.dumps(header).encode()
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(raw)))
+        f.write(raw)
+
+
+def test_local_dir_weights_from_safetensors_headers(tmp_path):
+    _write_safetensors(tmp_path / "model-00001-of-00002.safetensors",
+                       {"a": ("BF16", [1000, 1000]), "b": ("F32", [1000])})
+    _write_safetensors(tmp_path / "model-00002-of-00002.safetensors",
+                       {"c": ("I32", [10, 100])})
+    # Consolidated copy of the same weights must not be double-counted.
+    _write_safetensors(tmp_path / "consolidated.safetensors", {"a": ("BF16", [1000, 1000])})
+    wi = resolve_weights(str(tmp_path), {})
+    assert wi.source == "local_safetensors"
+    assert wi.total_params == 1_000_000 + 1000 + 1000
+    assert wi.weights_bytes == 1_000_000 * 2 + 1000 * 2 + 1000 * 4

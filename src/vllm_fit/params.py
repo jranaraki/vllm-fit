@@ -146,9 +146,50 @@ def _from_config(config: dict) -> Optional[WeightInfo]:
     return None
 
 
+def _from_local_dir(path: str) -> Optional[WeightInfo]:
+    """Per-dtype counts read from the safetensors headers of a local model directory."""
+    import glob
+    import os
+    import struct
+
+    files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
+    # Mistral-style repos ship consolidated.safetensors alongside HF shards; vLLM loads
+    # the HF shards, so don't count the consolidated copy twice.
+    if len(files) > 1:
+        files = [f for f in files if not os.path.basename(f).startswith("consolidated")] or files
+    per_dtype: Dict[str, int] = {}
+    try:
+        for name in files:
+            with open(name, "rb") as f:
+                (header_len,) = struct.unpack("<Q", f.read(8))
+                header = json.loads(f.read(header_len))
+            for key, tensor in header.items():
+                if key == "__metadata__" or not isinstance(tensor, dict):
+                    continue
+                count = 1
+                for dim in tensor.get("shape", []):
+                    count *= int(dim)
+                dtype = str(tensor.get("dtype", ""))
+                per_dtype[dtype] = per_dtype.get(dtype, 0) + count
+    except (OSError, ValueError, struct.error):
+        return None
+    if not per_dtype:
+        return None
+    return WeightInfo(
+        source="local_safetensors",
+        total_params=int(sum(per_dtype.values())),
+        weights_bytes=int(sum(c * _serving_bytes(dt) for dt, c in per_dtype.items())),
+        per_dtype=per_dtype,
+    )
+
+
 def resolve_weights(repo_id: str, config: dict) -> Optional[WeightInfo]:
     """Best available model-size information, exact first. ``None`` when nothing but the
     analytic estimate is possible (offline cache miss, or repo has no usable metadata)."""
+    import os
+
+    if os.path.isdir(repo_id):
+        return _from_local_dir(repo_id) or _from_config(config)
     for rung in (
         lambda: _from_safetensors_metadata(repo_id),
         lambda: _from_safetensors_index(repo_id),
