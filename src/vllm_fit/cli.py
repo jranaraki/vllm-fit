@@ -6,7 +6,7 @@ from rich import print
 from rich.console import Console
 from rich.panel import Panel
 
-from .engine_tester import profile_parameters, profile_parameters_cpu
+from .engine_tester import DEFAULT_TIMEOUT, profile_parameters, profile_parameters_cpu
 from .estimator import _CUDA_CONTEXT_GB, estimate_parameters, estimate_parameters_cpu
 from .hardware import get_free_vram_info, get_vram_info, detect_hardware, get_ram_info, is_apple_silicon
 from .params import resolve_weights
@@ -169,6 +169,24 @@ def _print_command(cmd: str) -> None:
     console.print(cmd, style="dim", soft_wrap=True, markup=False, highlight=False)
 
 
+def _report_profiling_failure(params: dict, elapsed_time: Optional[float] = None) -> None:
+    """Explain why profiling failed and exit non-zero; never print an untested command."""
+    if params.get("interrupted"):
+        print("[yellow]Profiling interrupted; no configuration was verified.[/yellow]")
+        raise typer.Exit(130)
+    if params.get("error"):
+        print(f"[red]❌ Profiling stopped: {params['error']}[/red]")
+        if params.get("error_detail"):
+            console.print(params["error_detail"], style="dim", markup=False, highlight=False)
+    else:
+        print("[red]⚠️  No configuration fits in memory, even at the smallest settings tried[/red]")
+    print()
+    print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
+    if elapsed_time is not None:
+        print(f"  • Time elapsed: {elapsed_time:.0f}s")
+    raise typer.Exit(1)
+
+
 @app.command()
 def recommend(
     model_id: str,
@@ -262,6 +280,10 @@ def profile(
     gpuid: str = typer.Option(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
+    timeout: int = typer.Option(
+        DEFAULT_TIMEOUT, "--timeout",
+        help="Seconds to wait for each vLLM test launch before giving up",
+    ),
 ) -> None:
     hardware_type = detect_hardware()
 
@@ -288,23 +310,14 @@ def profile(
             model_id,
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
+            timeout=timeout,
         )
 
         elapsed_time = time.time() - start_time
         print()
 
         if not params.get("profiling_success", False):
-            print("[red]⚠️  Profiling could not find a successful configuration[/red]")
-            print()
-            print("[yellow]Summary:[/yellow]")
-            print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
-            print(f"  • Time elapsed: {elapsed_time:.0f}s")
-            if params.get("enforce_eager", False):
-                print(
-                    "  • Strategy: Enabled --enforce-eager to reduce memory (disabled torch.compile)"
-                )
-            print("  • Parameters below are our best attempt")
-            print()
+            _report_profiling_failure(params, elapsed_time)
         else:
             print("[green]✓ Profiling completed successfully![/green]")
             print()
@@ -366,23 +379,14 @@ def profile(
             model_id,
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
+            timeout=timeout,
         )
 
         elapsed_time = time.time() - start_time
         print()
 
         if not params.get("profiling_success", False):
-            print("[red]⚠️  Profiling could not find a successful configuration[/red]")
-            print()
-            print("[yellow]Summary:[/yellow]")
-            print(f"  • Attempted {params.get('attempts_made', '?')} configurations")
-            print(f"  • Time elapsed: {elapsed_time:.0f}s")
-            if params.get("enforce_eager", False):
-                print(
-                    "  • Strategy: Enabled --enforce-eager to reduce memory (disabled torch.compile)"
-                )
-            print("  • Parameters below are our best attempt")
-            print()
+            _report_profiling_failure(params, elapsed_time)
         else:
             print("[green]✓ Profiling completed successfully![/green]")
             print()
@@ -422,6 +426,10 @@ def serve(
     gpuid: str = typer.Option(
         "all", "--gpuid", help="GPU ID(s) to use (e.g., '0', '0,1', 'all')"
     ),
+    timeout: int = typer.Option(
+        DEFAULT_TIMEOUT, "--timeout",
+        help="Seconds to wait for each vLLM test launch before giving up",
+    ),
 ) -> None:
     import os
     import subprocess
@@ -449,6 +457,7 @@ def serve(
             model_id,
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
+            timeout=timeout,
         )
         kv_space = params.get("kv_cache_space_gb")
         if kv_space:
@@ -483,15 +492,14 @@ def serve(
             model_id,
             initial_params,
             progress_callback=lambda msg: print(f"[dim]  {msg}[/dim]"),
+            timeout=timeout,
         )
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpuids))
 
     if not params.get("profiling_success", False):
         print()
-        print(
-            "[red]Profiling did not find a working configuration; not starting the server.[/red]"
-        )
-        raise typer.Exit(1)
+        print("[red]Not starting the server.[/red]")
+        _report_profiling_failure(params)
 
     cmd = _build_vllm_args(
         model_id,
