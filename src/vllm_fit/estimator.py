@@ -1,4 +1,5 @@
 from typing import Dict, Any, Optional
+import math
 import re
 
 from .config_resolver import (
@@ -11,6 +12,11 @@ from .config_resolver import (
     sliding_window,
     crosscheck_with_transformers,
 )
+
+
+# Memory vLLM's worker allocates for its own CUDA context before it checks that free
+# memory covers gpu_memory_utilization x total.
+_CUDA_CONTEXT_GB = 0.5
 
 
 def is_gguf_model(model_id: str) -> bool:
@@ -472,7 +478,10 @@ def estimate_parameters(
     num_gpus: int = 1,
     model_id: str = "",
     weight_info: Any = None,
+    free_vram: Optional[float] = None,
 ) -> Dict[str, Any]:
+    """GPU sizing. ``total_vram`` is the summed VRAM to size against; ``free_vram``,
+    when known, is the smallest currently-free memory among the selected GPUs."""
     warnings = []
     # Public entry point: tolerate a non-positive GPU count rather than dividing by
     # zero when called as a library (the CLI already guards this upstream).
@@ -517,6 +526,16 @@ def estimate_parameters(
     safety_gb = max(0.4, per_gpu_vram * 0.05)
     gpu_memory_utilization = min(0.90, max(0.5, (per_gpu_vram - safety_gb) / per_gpu_vram))
     gpu_memory_utilization = round(gpu_memory_utilization, 2)
+    # vLLM refuses to start unless free memory (measured after its own CUDA context is
+    # created) covers utilization x total, so memory held by other processes caps it.
+    if free_vram is not None and per_gpu_vram > 0:
+        free_cap = math.floor((free_vram - _CUDA_CONTEXT_GB) / per_gpu_vram * 100) / 100
+        if free_cap < gpu_memory_utilization:
+            gpu_memory_utilization = max(0.0, free_cap)
+            warnings.append(
+                f"{per_gpu_vram - free_vram:.1f} GB of GPU memory is already in use by other "
+                f"processes; gpu_memory_utilization lowered to {gpu_memory_utilization:.2f}"
+            )
     requested_gb = gpu_memory_utilization * per_gpu_vram
 
     # These don't depend on the CUDA-graph lever.
